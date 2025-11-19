@@ -15,7 +15,7 @@ import base64
 class TextureAnalyzer:
     """Análise de texturas usando LBP - DETECTOR PRIMÁRIO (SEM CLAHE)."""
     
-    def __init__(self, P=8, R=1, block_size=16, threshold=0.50):
+    def __init__(self, P=8, R=1, block_size=16, threshold=0.38):  # Balanceado: 0.38
         self.P = P
         self.R = R
         self.block_size = block_size
@@ -75,11 +75,11 @@ class TextureAnalyzer:
                     entropy_map[row_idx, col_idx] = norm_entropy
                     uniformity_map[row_idx, col_idx] = uniformity_penalty
         
-        # CRITICAL FIX: Pesos ajustados para detectar IA
-        # Variância e uniformidade são mais importantes que entropia!
-        naturalness_map = (entropy_map * 0.60 +  # Reduzido de 0.60 Motificado_edu
-                          variance_map * 0.20 +   # Aumentado de 0.20 Motificado_edu
-                          uniformity_map * 0.20)  # Aumentado de 0.20 Motificado_edu
+        # BALANCED: Pesos equilibrados
+        # Entropia detecta complexidade, variância detecta uniformidade de IA
+        naturalness_map = (entropy_map * 0.45 +  # Reduzido de 0.50
+                          variance_map * 0.35 +   # Aumentado de 0.25 
+                          uniformity_map * 0.20)  # Reduzido de 0.25
         
         # NÃO NORMALIZAR! Manter valores absolutos 0-1
         
@@ -88,14 +88,14 @@ class TextureAnalyzer:
         mean_naturalness = np.mean(naturalness_map)
         suspicious_ratio = np.mean(suspicious_mask)
         
-        # CRITICAL FIX: Penalização MUITO mais agressiva
-        # Qualquer sinal de uniformidade deve reduzir drasticamente o score
+        # BALANCED: Penalização média entre original (3.0) e suave (0.9)
+        # Detecta IA sem matar fotos reais com JPEG
         if suspicious_ratio > 0.05:  # Se > 5% da imagem é suspeita
-            penalty_factor = 1.0 - (suspicious_ratio * 1.5)  # Aumentado de 1.5 para 3.0! Motificado_edu
+            penalty_factor = 1.0 - (suspicious_ratio * 1.1)  # Balanceado: 1.1
         else:
-            penalty_factor = 1.0 - (suspicious_ratio * 1.0)  # Mesmo pequenas áreas penalizam Motificado_edu
+            penalty_factor = 1.0 - (suspicious_ratio * 0.7)  # Balanceado: 0.7
         
-        penalty_factor = max(0.3, penalty_factor)  # Mínimo 0.2 (era 0.3) Motificado_edu
+        penalty_factor = max(0.4, penalty_factor)  # Aumentado de 0.2 para 0.4 - menos agressivo
         
         naturalness_score = int(mean_naturalness * penalty_factor * 100)
         naturalness_score = max(0, min(100, naturalness_score))
@@ -115,10 +115,10 @@ class TextureAnalyzer:
         }
     
     def classify_naturalness(self, score):
-        # CRITICAL FIX: Thresholds mais rigorosos
-        if score <= 50:  # Aumentado de 45 para 50
+        # BALANCED: Thresholds intermediários
+        if score <= 45:  # Meio-termo entre 40 e 50
             return "Alta chance de manipulação", "Textura artificial detectada"
-        elif score <= 68:  # Aumentado de 65 para 68
+        elif score <= 65:  # Meio-termo entre 60 e 68
             return "Textura suspeita", "Revisão manual sugerida"
         else:
             return "Textura natural", "Baixa chance de manipulação"
@@ -351,7 +351,22 @@ class NoiseAnalyzer:
         noise_std = np.std(noise_map)
         
         noise_cv = noise_std / noise_mean if noise_mean > 0 else 0
-        noise_consistency_score = int(max(0, min(100, 100 - (noise_cv * 200))))
+        
+        # FIX CRÍTICO: Fórmula original estava quebrada!
+        # CV de 0.3-0.8 é NORMAL em imagens reais (variação natural entre áreas)
+        # IA tende a ter CV mais uniforme (0.2-0.4) ou muito inconsistente (>1.0)
+        
+        if noise_cv < 0.2:
+            # Muito uniforme = suspeito (IA)
+            noise_consistency_score = 30
+        elif noise_cv <= 0.8:
+            # Variação normal = natural
+            # Mapear 0.2-0.8 para scores 60-85
+            normalized = (noise_cv - 0.2) / 0.6  # 0 a 1
+            noise_consistency_score = int(60 + (1 - normalized) * 25)  # 85 quando CV=0.2, 60 quando CV=0.8
+        else:
+            # Muito inconsistente = suspeito
+            noise_consistency_score = max(20, int(60 - (noise_cv - 0.8) * 50))
         
         return noise_consistency_score
     
@@ -453,8 +468,9 @@ class SequentialAnalyzer:
         all_scores['texture'] = texture_score
         validation_chain.append('texture')
         
-        # CRITICAL FIX: Threshold mais rigoroso (50 ao invés de 45)
-        if texture_score < 50:
+        # BALANCED: Threshold ajustado para considerar compressão JPEG
+        # Scores 35-50 vão para Fase 2 (podem ser fotos com JPEG pesado)
+        if texture_score < 35:  # Só rejeita se MUITO baixo
             return {
                 "verdict": "MANIPULADA",
                 "confidence": 95,
@@ -469,7 +485,7 @@ class SequentialAnalyzer:
                 "detailed_reason": f"Score {texture_score}/100 indica textura artificial típica de IA."
             }
         
-        if texture_score > 75:  # Aumentado de 70 para 75
+        if texture_score > 70:  # Ajustado para 70 (mais rigoroso)
             return {
                 "verdict": "NATURAL",
                 "confidence": 85,
@@ -492,20 +508,48 @@ class SequentialAnalyzer:
         all_scores['edge'] = edge_score
         validation_chain.append('edge')
         
-        if edge_score < 40:
-            return {
-                "verdict": "MANIPULADA",
-                "confidence": 90,
-                "reason": "Textura duvidosa + bordas artificiais",
-                "main_score": texture_score,
-                "all_scores": all_scores,
-                "validation_chain": validation_chain,
-                "phases_executed": 2,
-                "visual_report": texture_result['visual_report'],
-                "heatmap": texture_result['heatmap'],
-                "percent_suspicious": texture_result['percent_suspicious'],
-                "detailed_reason": f"Textura suspeita ({texture_score}/100) confirmada por bordas artificiais ({edge_score}/100)."
-            }
+        # BALANCED: Fase 2 considera contexto da textura
+        # Se textura > 45 mas bordas < 40, pode ser JPEG pesado (não IA!)
+        # MAS: Se bordas < 30, é forte indicador de IA mesmo com textura OK
+        
+        if edge_score < 30:
+            # Bordas MUITO ruins = forte indicador de IA
+            if texture_score < 55:
+                # Bordas ruins + textura não-excelente = IA confirmada
+                return {
+                    "verdict": "MANIPULADA",
+                    "confidence": 90,
+                    "reason": "Bordas artificiais detectadas",
+                    "main_score": texture_score,
+                    "all_scores": all_scores,
+                    "validation_chain": validation_chain,
+                    "phases_executed": 2,
+                    "visual_report": texture_result['visual_report'],
+                    "heatmap": texture_result['heatmap'],
+                    "percent_suspicious": texture_result['percent_suspicious'],
+                    "detailed_reason": f"Bordas artificiais ({edge_score}/100) confirmam suspeita de textura ({texture_score}/100)."
+                }
+        
+        elif edge_score < 40:
+            # Se textura estava OK (38-50), bordas ruins podem ser compressão
+            if texture_score >= 38:
+                # Continuar para Fase 3 (não decidir ainda)
+                pass
+            else:
+                # Textura MUITO ruim + bordas ruins = IA confirmada
+                return {
+                    "verdict": "MANIPULADA",
+                    "confidence": 90,
+                    "reason": "Textura duvidosa + bordas artificiais",
+                    "main_score": texture_score,
+                    "all_scores": all_scores,
+                    "validation_chain": validation_chain,
+                    "phases_executed": 2,
+                    "visual_report": texture_result['visual_report'],
+                    "heatmap": texture_result['heatmap'],
+                    "percent_suspicious": texture_result['percent_suspicious'],
+                    "detailed_reason": f"Textura artificial ({texture_score}/100) confirmada por bordas artificiais ({edge_score}/100)."
+                }
         
         # ========================================
         # FASE 3: VALIDADOR DE RUÍDO
@@ -531,46 +575,81 @@ class SequentialAnalyzer:
             }
         
         # ========================================
-        # FASE 4: VALIDADOR DE FÍSICA
+        # FASE 4: VALIDADOR DE FÍSICA (DESABILITADA)
         # ========================================
-        lighting_result = self.lighting_analyzer.analyze_image(image)
-        lighting_score = lighting_result['lighting_score']
-        all_scores['lighting'] = lighting_score
-        validation_chain.append('lighting')
+        # NOTA: LightingAnalyzer está dando score 0 para TODAS as imagens
+        # Precisa recalibração. Por agora, desabilitado.
         
-        if lighting_score < 10:
-            return {
-                "verdict": "MANIPULADA",
-                "confidence": 80,
-                "reason": "Física da iluminação impossível",
-                "main_score": texture_score,
-                "all_scores": all_scores,
-                "validation_chain": validation_chain,
-                "phases_executed": 4,
-                "visual_report": texture_result['visual_report'],
-                "heatmap": texture_result['heatmap'],
-                "percent_suspicious": texture_result['percent_suspicious'],
-                "detailed_reason": f"Iluminação inconsistente ({lighting_score}/100)."
-            }
+        #lighting_result = self.lighting_analyzer.analyze_image(image)
+        #lighting_score = lighting_result['lighting_score']
+        #all_scores['lighting'] = lighting_score
+        #validation_chain.append('lighting')
+        
+        #if lighting_score < 10:
+        #    return {
+        #        "verdict": "MANIPULADA",
+        #        "confidence": 80,
+        #        "reason": "Física da iluminação impossível",
+        #        "main_score": texture_score,
+        #        "all_scores": all_scores,
+        #        "validation_chain": validation_chain,
+        #        "phases_executed": 4,
+        #        "visual_report": texture_result['visual_report'],
+        #        "heatmap": texture_result['heatmap'],
+        #        "percent_suspicious": texture_result['percent_suspicious'],
+        #        "detailed_reason": f"Iluminação inconsistente ({lighting_score}/100)."
+        #    }
         
         # ========================================
-        # CASO FINAL: ANÁLISE INCONCLUSIVA
+        # DECISÃO FINAL: LÓGICA BASEADA EM REGRAS V2
         # ========================================
+        
         weighted_score = (
             texture_score * 0.50 +
-            edge_score * 0.25 +
-            noise_score * 0.15 +
-            lighting_score * 0.10
+            edge_score * 0.30 +
+            noise_score * 0.20
         )
         
-        if weighted_score < 55:
-            verdict = "SUSPEITA"
+        phases_count = 3
+        
+        # REGRA 1: IA óbvia (texture BEM ruim + edge ruim)
+        if texture_score < 38 and edge_score < 32:  # Mais rigoroso
+            verdict = "MANIPULADA"
+            confidence = 90
+            reason = "Textura e bordas artificiais"
+        
+        # REGRA 2: Foto real provável (noise BOM + texture no range JPEG)
+        # MAS: Se texture>=48, pode ser IA moderna (não aplicar)
+        elif noise_score >= 60 and 38 <= texture_score < 48 and edge_score >= 30:
+            verdict = "SUSPEITA"  # Seguro: não aprovar, não rejeitar
             confidence = 70
-            reason = "Múltiplos indicadores ambíguos"
-        else:
+            reason = "Ruído natural detectado, textura afetada por compressão"
+        
+        # REGRA 3: IA moderna (texture OK mas edge MUITO ruim)
+        elif texture_score >= 45 and edge_score < 32:
+            verdict = "MANIPULADA"
+            confidence = 88
+            reason = "Bordas artificiais típicas de IA"
+        
+        # REGRA 4: Foto de boa qualidade
+        elif weighted_score > 55 and noise_score >= 55:
+            verdict = "NATURAL"
+            confidence = 82
+            reason = "Texturas e ruído naturais"
+        
+        # REGRA 5: Score ponderado (fallback)
+        elif weighted_score < 45:
+            verdict = "MANIPULADA"
+            confidence = 80
+            reason = "Score ponderado indica artifícios"
+        elif weighted_score > 52:
             verdict = "INCONCLUSIVA"
             confidence = 60
-            reason = "Revisão manual necessária"
+            reason = "Características ambíguas"
+        else:
+            verdict = "SUSPEITA"
+            confidence = 70
+            reason = "Indicadores ambíguos - revisão recomendada"
         
         return {
             "verdict": verdict,
@@ -579,7 +658,7 @@ class SequentialAnalyzer:
             "main_score": int(weighted_score),
             "all_scores": all_scores,
             "validation_chain": validation_chain,
-            "phases_executed": 4,
+            "phases_executed": phases_count,  # 3 fases (sem lighting)
             "visual_report": texture_result['visual_report'],
             "heatmap": texture_result['heatmap'],
             "percent_suspicious": texture_result['percent_suspicious'],
