@@ -77,9 +77,9 @@ class TextureAnalyzer:
         
         # CRITICAL FIX: Pesos ajustados para detectar IA
         # Variância e uniformidade são mais importantes que entropia!
-        naturalness_map = (entropy_map * 0.30 +  # Reduzido de 0.60
-                          variance_map * 0.40 +   # Aumentado de 0.20
-                          uniformity_map * 0.30)  # Aumentado de 0.20
+        naturalness_map = (entropy_map * 0.60 +  # Reduzido de 0.60 Motificado_edu
+                          variance_map * 0.20 +   # Aumentado de 0.20 Motificado_edu
+                          uniformity_map * 0.20)  # Aumentado de 0.20 Motificado_edu
         
         # NÃO NORMALIZAR! Manter valores absolutos 0-1
         
@@ -91,11 +91,11 @@ class TextureAnalyzer:
         # CRITICAL FIX: Penalização MUITO mais agressiva
         # Qualquer sinal de uniformidade deve reduzir drasticamente o score
         if suspicious_ratio > 0.05:  # Se > 5% da imagem é suspeita
-            penalty_factor = 1.0 - (suspicious_ratio * 3.0)  # Aumentado de 1.5 para 3.0!
+            penalty_factor = 1.0 - (suspicious_ratio * 1.5)  # Aumentado de 1.5 para 3.0! Motificado_edu
         else:
-            penalty_factor = 1.0 - (suspicious_ratio * 2.0)  # Mesmo pequenas áreas penalizam
+            penalty_factor = 1.0 - (suspicious_ratio * 1.0)  # Mesmo pequenas áreas penalizam Motificado_edu
         
-        penalty_factor = max(0.2, penalty_factor)  # Mínimo 0.2 (era 0.3)
+        penalty_factor = max(0.3, penalty_factor)  # Mínimo 0.2 (era 0.3) Motificado_edu
         
         naturalness_score = int(mean_naturalness * penalty_factor * 100)
         naturalness_score = max(0, min(100, naturalness_score))
