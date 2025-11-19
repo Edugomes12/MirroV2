@@ -435,10 +435,10 @@ class SequentialAnalyzer:
     """Sistema de Análise Sequencial - Validação em Cadeia"""
     
     def __init__(self):
-        self.texture_analyzer = TextureAnalyzer()
-        self.edge_analyzer = EdgeAnalyzer(use_clahe=True)
-        self.noise_analyzer = NoiseAnalyzer(use_clahe=True)
-        self.lighting_analyzer = LightingAnalyzer(use_clahe=True)
+        self.texture_analyzer = TextureAnalyzer() #Analisa textura sem CLAHE
+        self.edge_analyzer = EdgeAnalyzer(use_clahe=True) #Analisa bordas com CLAHE
+        self.noise_analyzer = NoiseAnalyzer(use_clahe=True) #Analisa ruído com CLAHE
+        self.lighting_analyzer = LightingAnalyzer(use_clahe=True) #Analisa iluminação com CLAHE
     
     def analyze_sequential(self, image):
         """Análise sequencial com validação em cadeia."""
