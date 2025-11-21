@@ -1,6 +1,6 @@
 # texture_analyzer.py
 # Sistema de Análise Sequencial com Validação em Cadeia
-# Versão: 4.1.0 - Janeiro 2025 (Fixed Detection + No Normalization)
+# Versão: 4.3.0 - Com Detecção de Reflexo
 
 import cv2
 import numpy as np
@@ -10,6 +10,105 @@ from scipy.stats import entropy
 from PIL import Image
 import io
 import base64
+
+
+class ReflectionMask:
+    """
+    Detecta áreas com reflexo (vidro, parabrisas, superfícies brilhantes).
+    
+    Reflexo possui três características:
+    1. Brilho muito alto e saturado
+    2. Gradientes fortes em apenas 1 direção
+    3. Baixa entropia local
+    """
+    
+    def __init__(self, brightness_thresh=220, entropy_thresh=0.15, gradient_thresh=80):
+        self.brightness_thresh = brightness_thresh
+        self.entropy_thresh = entropy_thresh
+        self.gradient_thresh = gradient_thresh
+
+    def compute_local_entropy(self, gray, block_size=16):
+        """Calcula entropia local por blocos."""
+        h, w = gray.shape
+        entropy_map = np.zeros((h // block_size, w // block_size))
+        
+        for i in range(0, h - block_size, block_size):
+            for j in range(0, w - block_size, block_size):
+                block = gray[i:i+block_size, j:j+block_size]
+                hist, _ = np.histogram(block.ravel(), bins=256, range=(0, 256))
+                hist = hist.astype("float") / (hist.sum() + 1e-7)
+                ent = entropy(hist)
+                row_idx = i // block_size
+                col_idx = j // block_size
+                if row_idx < entropy_map.shape[0] and col_idx < entropy_map.shape[1]:
+                    entropy_map[row_idx, col_idx] = ent
+        
+        return entropy_map
+
+    def detect_reflection(self, image):
+        """
+        Detecta áreas com reflexo na imagem.
+        
+        Returns:
+            mask: Máscara onde 255 = área com reflexo
+            percent: Porcentagem da imagem com reflexo
+        """
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
+        
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image.copy()
+
+        h, w = gray.shape
+
+        # 1) Brightness map (reflexo é muito claro)
+        _, bright_mask = cv2.threshold(gray, self.brightness_thresh, 255, cv2.THRESH_BINARY)
+
+        # 2) Gradiente especular (bordas fortes)
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=5)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
+        magnitude = cv2.magnitude(grad_x, grad_y)
+        gradient_mask = (magnitude > self.gradient_thresh).astype(np.uint8) * 255
+
+        # 3) Detecção de saturação (reflexo costuma ter baixa saturação em HSV)
+        if len(image.shape) == 3:
+            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            saturation = hsv[:, :, 1]
+            low_sat_mask = cv2.threshold(saturation, 30, 255, cv2.THRESH_BINARY_INV)[1]
+            bright_and_low_sat = cv2.bitwise_and(bright_mask, low_sat_mask)
+        else:
+            bright_and_low_sat = bright_mask
+
+        # 4) Combinação: áreas claras com baixa saturação OU brilho extremo com gradiente
+        combined = cv2.bitwise_or(bright_and_low_sat, cv2.bitwise_and(bright_mask, gradient_mask))
+
+        # 5) Limpeza morfológica
+        kernel = np.ones((7, 7), np.uint8)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        
+        # Dilatar para pegar bordas do reflexo
+        combined = cv2.dilate(combined, np.ones((5, 5), np.uint8), iterations=2)
+
+        # Calcular porcentagem
+        percent_reflection = np.mean(combined > 0)
+
+        return combined, percent_reflection
+
+    def get_non_reflective_mask(self, image):
+        """
+        Retorna máscara das áreas SEM reflexo (para análise).
+        
+        Returns:
+            mask: Máscara onde 255 = área válida para análise (sem reflexo)
+            percent_valid: Porcentagem da imagem válida para análise
+        """
+        reflection_mask, percent_reflection = self.detect_reflection(image)
+        non_reflective = cv2.bitwise_not(reflection_mask)
+        percent_valid = 1.0 - percent_reflection
+        return non_reflective, percent_valid, percent_reflection
 
 
 class TextureAnalyzer:
@@ -77,9 +176,9 @@ class TextureAnalyzer:
         
         # BALANCED: Pesos equilibrados
         # Entropia detecta complexidade, variância detecta uniformidade de IA
-        naturalness_map = (entropy_map * 0.45 +  # Reduzido de 0.50
-                          variance_map * 0.35 +   # Aumentado de 0.25 
-                          uniformity_map * 0.20)  # Reduzido de 0.25
+        naturalness_map = (entropy_map * 0.50 +  # Reduzido de 0.50
+                          variance_map * 0.25 +   # Aumentado de 0.25 
+                          uniformity_map * 0.25)  # Reduzido de 0.25
         
         # NÃO NORMALIZAR! Manter valores absolutos 0-1
         
@@ -447,24 +546,58 @@ class LightingAnalyzer:
 
 
 class SequentialAnalyzer:
-    """Sistema de Análise Sequencial - Validação em Cadeia"""
+    """Sistema de Análise Sequencial - Validação em Cadeia com Detecção de Reflexo"""
     
     def __init__(self):
-        self.texture_analyzer = TextureAnalyzer() #Analisa textura sem CLAHE
-        self.edge_analyzer = EdgeAnalyzer(use_clahe=True) #Analisa bordas com CLAHE
-        self.noise_analyzer = NoiseAnalyzer(use_clahe=True) #Analisa ruído com CLAHE
-        self.lighting_analyzer = LightingAnalyzer(use_clahe=True) #Analisa iluminação com CLAHE
+        self.texture_analyzer = TextureAnalyzer()
+        self.edge_analyzer = EdgeAnalyzer(use_clahe=True)
+        self.noise_analyzer = NoiseAnalyzer(use_clahe=True)
+        self.lighting_analyzer = LightingAnalyzer(use_clahe=True)
+        self.reflection_detector = ReflectionMask()  # NOVO: Detector de reflexo
     
     def analyze_sequential(self, image):
-        """Análise sequencial com validação em cadeia."""
+        """Análise sequencial com validação em cadeia e compensação de reflexo."""
         validation_chain = []
         all_scores = {}
+        
+        # ========================================
+        # FASE 0: DETECÇÃO DE REFLEXO
+        # ========================================
+        non_reflective_mask, percent_valid, percent_reflection = \
+            self.reflection_detector.get_non_reflective_mask(image)
+        
+        all_scores['reflection'] = round(percent_reflection * 100, 1)
+        validation_chain.append('reflection')
+        
+        # Determinar modo de análise baseado em reflexo
+        # >= 30% reflexo: ignorar áreas reflexivas completamente
+        # 5-30% reflexo: compensar scores
+        # < 5% reflexo: análise normal
+        
+        if percent_reflection >= 0.30:
+            reflection_mode = "IGNORE"      # Ignorar reflexo completamente
+            reflection_boost = 1.4          # Boost alto nos scores
+        elif percent_reflection >= 0.10:
+            reflection_mode = "HEAVY_COMPENSATE"  # Compensação pesada
+            reflection_boost = 1.25
+        elif percent_reflection >= 0.05:
+            reflection_mode = "LIGHT_COMPENSATE"  # Compensação leve
+            reflection_boost = 1.1
+        else:
+            reflection_mode = "NORMAL"      # Análise normal
+            reflection_boost = 1.0
         
         # ========================================
         # FASE 1: DETECTOR PRIMÁRIO (Textura)
         # ========================================
         texture_result = self.texture_analyzer.analyze_image(image)
         texture_score = texture_result['score']
+        
+        # Aplicar compensação de reflexo na textura
+        if reflection_mode != "NORMAL":
+            texture_score_original = texture_score
+            texture_score = min(100, int(texture_score * reflection_boost))
+        
         all_scores['texture'] = texture_score
         validation_chain.append('texture')
         
@@ -505,15 +638,30 @@ class SequentialAnalyzer:
         # ========================================
         edge_result = self.edge_analyzer.analyze_image(image)
         edge_score = edge_result['edge_score']
+        
+        # Aplicar compensação de reflexo nas bordas
+        # Reflexo causa bordas caóticas que parecem artificiais
+        if reflection_mode in ["IGNORE", "HEAVY_COMPENSATE"]:
+            edge_score_original = edge_score
+            if edge_score < 35:
+                # Reflexo pesado: suavizar penalidade de bordas
+                edge_score = int((edge_score + 50) / 2)  # Média com 50
+            else:
+                edge_score = min(100, int(edge_score * reflection_boost))
+        elif reflection_mode == "LIGHT_COMPENSATE":
+            edge_score = min(100, int(edge_score * reflection_boost))
+        
         all_scores['edge'] = edge_score
         validation_chain.append('edge')
         
-        # BALANCED: Fase 2 considera contexto da textura
-        # Se textura > 45 mas bordas < 40, pode ser JPEG pesado (não IA!)
-        # MAS: Se bordas < 30, é forte indicador de IA mesmo com textura OK
+        # BALANCED: Fase 2 considera contexto da textura E reflexo
+        # Se há muito reflexo, ser mais tolerante com bordas ruins
         
-        if edge_score < 30:
-            # Bordas MUITO ruins = forte indicador de IA
+        edge_threshold_low = 30 if reflection_mode == "NORMAL" else 25
+        edge_threshold_medium = 40 if reflection_mode == "NORMAL" else 35
+        
+        if edge_score < edge_threshold_low:
+            # Bordas MUITO ruins = forte indicador de IA (mesmo com reflexo)
             if texture_score < 55:
                 # Bordas ruins + textura não-excelente = IA confirmada
                 return {
@@ -530,7 +678,7 @@ class SequentialAnalyzer:
                     "detailed_reason": f"Bordas artificiais ({edge_score}/100) confirmam suspeita de textura ({texture_score}/100)."
                 }
         
-        elif edge_score < 40:
+        elif edge_score < edge_threshold_medium:
             # Se textura estava OK (38-50), bordas ruins podem ser compressão
             if texture_score >= 38:
                 # Continuar para Fase 3 (não decidir ainda)
@@ -556,10 +704,26 @@ class SequentialAnalyzer:
         # ========================================
         noise_result = self.noise_analyzer.analyze_image(image)
         noise_score = noise_result['noise_score']
+        
+        # Aplicar compensação de reflexo no ruído
+        # Reflexo reduz ruído artificialmente (áreas "lavadas")
+        if reflection_mode in ["IGNORE", "HEAVY_COMPENSATE"]:
+            noise_score_original = noise_score
+            if noise_score < 45:
+                # Reflexo pesado: aumentar score de ruído
+                noise_score = min(100, int(noise_score * 1.5))
+            else:
+                noise_score = min(100, int(noise_score * reflection_boost))
+        elif reflection_mode == "LIGHT_COMPENSATE":
+            noise_score = min(100, int(noise_score * reflection_boost))
+        
         all_scores['noise'] = noise_score
         validation_chain.append('noise')
         
-        if noise_score < 40:
+        # Threshold de ruído ajustado pelo reflexo
+        noise_threshold = 40 if reflection_mode == "NORMAL" else 30
+        
+        if noise_score < noise_threshold:
             return {
                 "verdict": "MANIPULADA",
                 "confidence": 85,
@@ -601,7 +765,7 @@ class SequentialAnalyzer:
         #    }
         
         # ========================================
-        # DECISÃO FINAL: LÓGICA BASEADA EM REGRAS V2
+        # DECISÃO FINAL: LÓGICA COM REFLEXO
         # ========================================
         
         weighted_score = (
@@ -612,16 +776,31 @@ class SequentialAnalyzer:
         
         phases_count = 3
         
+        # REGRA 0 (NOVA): Se muito reflexo, ser mais tolerante
+        if reflection_mode in ["IGNORE", "HEAVY_COMPENSATE"]:
+            # Com muito reflexo: priorizar ruído (menos afetado)
+            if noise_score >= 55:
+                verdict = "SUSPEITA"  # Não rejeitar, mandar para revisão
+                confidence = 70
+                reason = f"Imagem com {all_scores['reflection']:.0f}% reflexo - ruído sugere foto real"
+            elif noise_score < 40 and texture_score < 40:
+                verdict = "MANIPULADA"
+                confidence = 80
+                reason = "IA detectada mesmo com compensação de reflexo"
+            else:
+                verdict = "SUSPEITA"
+                confidence = 65
+                reason = f"Alto reflexo ({all_scores['reflection']:.0f}%) - revisão manual recomendada"
+        
         # REGRA 1: IA óbvia (texture BEM ruim + edge ruim)
-        if texture_score < 38 and edge_score < 32:  # Mais rigoroso
+        elif texture_score < 38 and edge_score < 32:
             verdict = "MANIPULADA"
             confidence = 90
             reason = "Textura e bordas artificiais"
         
         # REGRA 2: Foto real provável (noise BOM + texture no range JPEG)
-        # MAS: Se texture>=48, pode ser IA moderna (não aplicar)
         elif noise_score >= 60 and 38 <= texture_score < 48 and edge_score >= 30:
-            verdict = "SUSPEITA"  # Seguro: não aprovar, não rejeitar
+            verdict = "SUSPEITA"
             confidence = 70
             reason = "Ruído natural detectado, textura afetada por compressão"
         
@@ -651,6 +830,9 @@ class SequentialAnalyzer:
             confidence = 70
             reason = "Indicadores ambíguos - revisão recomendada"
         
+        # Adicionar info de reflexo na razão detalhada
+        reflection_info = f" [Reflexo: {all_scores['reflection']:.1f}%]" if all_scores['reflection'] > 5 else ""
+        
         return {
             "verdict": verdict,
             "confidence": confidence,
@@ -658,11 +840,11 @@ class SequentialAnalyzer:
             "main_score": int(weighted_score),
             "all_scores": all_scores,
             "validation_chain": validation_chain,
-            "phases_executed": phases_count,  # 3 fases (sem lighting)
+            "phases_executed": phases_count,
             "visual_report": texture_result['visual_report'],
             "heatmap": texture_result['heatmap'],
             "percent_suspicious": texture_result['percent_suspicious'],
-            "detailed_reason": f"Score ponderado: {int(weighted_score)}/100."
+            "detailed_reason": f"Score ponderado: {int(weighted_score)}/100.{reflection_info}"
         }
 
 
