@@ -111,6 +111,59 @@ class ReflectionMask:
         return non_reflective, percent_valid, percent_reflection
 
 
+class DocumentDetector:
+    """
+    Detecta áreas com documentos/papéis na imagem.
+    Papel branco com texto não deve ser confundido com IA.
+    """
+    
+    def __init__(self, white_thresh=160, min_area_percent=1.0):
+        self.white_thresh = white_thresh  # 160 para pegar papel/vidro claro
+        self.min_area_percent = min_area_percent
+    
+    def detect_document(self, image):
+        """Detecta documento/papel na imagem."""
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
+        
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image.copy()
+        
+        h, w = gray.shape
+        
+        # Detectar áreas brancas (papel)
+        _, white_mask = cv2.threshold(gray, self.white_thresh, 255, cv2.THRESH_BINARY)
+        
+        # Detectar texto (áreas escuras)
+        _, dark_mask = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+        
+        # Encontrar contornos de áreas brancas
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        total_doc_area = 0
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            area_percent = area / (h * w) * 100
+            
+            if area_percent >= self.min_area_percent:
+                mask_temp = np.zeros((h, w), dtype=np.uint8)
+                cv2.drawContours(mask_temp, [contour], -1, 255, -1)
+                
+                text_area = cv2.bitwise_and(dark_mask, mask_temp)
+                text_percent = np.sum(text_area > 0) / (np.sum(mask_temp > 0) + 1) * 100
+                
+                if text_percent > 3:
+                    total_doc_area += area
+        
+        percent_document = total_doc_area / (h * w)
+        has_document = percent_document >= (self.min_area_percent / 100)
+        
+        return percent_document, has_document
+
+
 class TextureAnalyzer:
     """Análise de texturas usando LBP - DETECTOR PRIMÁRIO (SEM CLAHE)."""
     
@@ -546,22 +599,23 @@ class LightingAnalyzer:
 
 
 class SequentialAnalyzer:
-    """Sistema de Análise Sequencial - Validação em Cadeia com Detecção de Reflexo"""
+    """Sistema de Análise Sequencial - Validação em Cadeia com Detecção de Reflexo e Documento"""
     
     def __init__(self):
         self.texture_analyzer = TextureAnalyzer()
         self.edge_analyzer = EdgeAnalyzer(use_clahe=True)
         self.noise_analyzer = NoiseAnalyzer(use_clahe=True)
         self.lighting_analyzer = LightingAnalyzer(use_clahe=True)
-        self.reflection_detector = ReflectionMask()  # NOVO: Detector de reflexo
+        self.reflection_detector = ReflectionMask()
+        self.document_detector = DocumentDetector()  # NOVO
     
     def analyze_sequential(self, image):
-        """Análise sequencial com validação em cadeia e compensação de reflexo."""
+        """Análise sequencial com validação em cadeia e compensação de reflexo/documento."""
         validation_chain = []
         all_scores = {}
         
         # ========================================
-        # FASE 0: DETECÇÃO DE REFLEXO
+        # FASE 0A: DETECÇÃO DE REFLEXO
         # ========================================
         non_reflective_mask, percent_valid, percent_reflection = \
             self.reflection_detector.get_non_reflective_mask(image)
@@ -569,23 +623,32 @@ class SequentialAnalyzer:
         all_scores['reflection'] = round(percent_reflection * 100, 1)
         validation_chain.append('reflection')
         
-        # Determinar modo de análise baseado em reflexo
-        # >= 30% reflexo: ignorar áreas reflexivas completamente
-        # 5-30% reflexo: compensar scores
-        # < 5% reflexo: análise normal
+        # ========================================
+        # FASE 0B: DETECÇÃO DE DOCUMENTO (NOVO)
+        # ========================================
+        percent_document, has_document = self.document_detector.detect_document(image)
+        all_scores['document'] = round(percent_document * 100, 1)
         
+        # Determinar modo de análise baseado em reflexo
         if percent_reflection >= 0.30:
-            reflection_mode = "IGNORE"      # Ignorar reflexo completamente
-            reflection_boost = 1.4          # Boost alto nos scores
+            reflection_mode = "IGNORE"
+            reflection_boost = 1.4
         elif percent_reflection >= 0.10:
-            reflection_mode = "HEAVY_COMPENSATE"  # Compensação pesada
+            reflection_mode = "HEAVY_COMPENSATE"
             reflection_boost = 1.25
         elif percent_reflection >= 0.05:
-            reflection_mode = "LIGHT_COMPENSATE"  # Compensação leve
+            reflection_mode = "LIGHT_COMPENSATE"
             reflection_boost = 1.1
         else:
-            reflection_mode = "NORMAL"      # Análise normal
+            reflection_mode = "NORMAL"
             reflection_boost = 1.0
+        
+        # NOVO: Se tem documento, aplicar boost adicional
+        document_boost = 1.0
+        if has_document:
+            document_boost = 1.15
+            if percent_document > 0.10:
+                document_boost = 1.25
         
         # ========================================
         # FASE 1: DETECTOR PRIMÁRIO (Textura)
@@ -595,15 +658,20 @@ class SequentialAnalyzer:
         
         # Aplicar compensação de reflexo na textura
         if reflection_mode != "NORMAL":
-            texture_score_original = texture_score
             texture_score = min(100, int(texture_score * reflection_boost))
+        
+        # Aplicar compensação de documento (papel branco não é IA)
+        if has_document:
+            texture_score = min(100, int(texture_score * document_boost))
         
         all_scores['texture'] = texture_score
         validation_chain.append('texture')
         
-        # BALANCED: Threshold ajustado para considerar compressão JPEG
-        # Scores 35-50 vão para Fase 2 (podem ser fotos com JPEG pesado)
-        if texture_score < 35:  # Só rejeita se MUITO baixo
+        # BALANCED: Threshold ajustado para considerar compressão JPEG e documentos
+        # Com documento, ser mais tolerante
+        texture_threshold_low = 30 if has_document else 35
+        
+        if texture_score < texture_threshold_low:  # Só rejeita se MUITO baixo
             return {
                 "verdict": "MANIPULADA",
                 "confidence": 95,
@@ -810,11 +878,26 @@ class SequentialAnalyzer:
             confidence = 88
             reason = "Bordas artificiais típicas de IA"
         
-        # REGRA 4: Foto de boa qualidade
-        elif weighted_score > 55 and noise_score >= 55:
+        # REGRA 3B (NOVA): IA avançada (Gemini/GPT-4o)
+        # Detecta IAs com ruído sintético perfeito + scores medianos
+        # Padrão: noise MUITO alto (>75), texture médio (50-70), edge médio (35-50)
+        elif noise_score >= 75 and 50 <= texture_score <= 70 and 35 <= edge_score <= 50:
+            verdict = "SUSPEITA"
+            confidence = 75
+            reason = "Possível IA avançada - ruído sintético detectado"
+        
+        # REGRA 4: Foto de boa qualidade (MAIS RIGOROSA)
+        # Agora exige weighted_score > 62 (era 55) E texture > 55
+        elif weighted_score > 62 and noise_score >= 55 and texture_score > 55:
             verdict = "NATURAL"
             confidence = 82
             reason = "Texturas e ruído naturais"
+        
+        # REGRA 4B: Score médio-alto vai para SUSPEITA (não NATURAL)
+        elif weighted_score > 55 and noise_score >= 55:
+            verdict = "SUSPEITA"
+            confidence = 70
+            reason = "Características mistas - revisão recomendada"
         
         # REGRA 5: Score ponderado (fallback)
         elif weighted_score < 45:
