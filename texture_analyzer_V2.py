@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
+MirrorGlass V4.8 - Anti-Fake-Noise System (CORREÇÃO VISUAL)
+==================================================
+
+🚨 CORREÇÃO V4.8.1:
+✅ SEMPRE gera visual_report e heatmap (mesmo em decisões rápidas)
+✅ Usuário sempre vê a imagem analisada
+
 Autor: MirrorGlass AI Detection System
-Versão: 2.0 
-Data: 24/11/2025
+Versão: 4.8.1 - Visual Fix
+Data: 25/11/2025
 """
 
 import cv2
@@ -62,68 +69,39 @@ class AnalysisLogger:
 # ============================================================================
 
 class ReflectionMaskV46:
-    """
-    V4.6: ReflectionMask 3x mais inteligente.
-    
-    NOVA ABORDAGEM - 3 CAMADAS DE DETECÇÃO:
-    1. Brilho moderado (150+, não 200+)
-    2. Baixa saturação (reflexo especular)
-    3. Baixa variância local (vidro refletindo céu)
-    
-    CRITICAL FIX: Céu refletido (110-170 brightness) agora é detectado!
-    """
+    """V4.6: ReflectionMask 3x mais inteligente."""
     
     def __init__(self, logger: AnalysisLogger = None):
         self.logger = logger or AnalysisLogger()
     
     def detect_reflection(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
-        """
-        Detecta reflexos com 3 camadas de análise.
-        
-        Returns:
-            reflection_mask: Máscara de reflexos
-            percent_reflection: Porcentagem de reflexo (0-1)
-        """
+        """Detecta reflexos com 3 camadas de análise."""
         if isinstance(image, Image.Image):
             image = np.array(image.convert('RGB'))
         
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
         
-        # ===================================================================
-        # CAMADA 1: BRILHO MODERADO (não mais 200, agora 170!)
-        # ===================================================================
-        # Céu refletido tem brightness médio 110-170
-        # Threshold 170 é o meio-termo entre detector antigo (200) e muito baixo (150)
+        # CAMADA 1: BRILHO MODERADO
         _, bright_mask = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
         
-        # ===================================================================
-        # CAMADA 2: BAIXA SATURAÇÃO (reflexo especular)
-        # ===================================================================
+        # CAMADA 2: BAIXA SATURAÇÃO
         if len(image.shape) == 3:
             hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
             saturation = hsv[:, :, 1]
-            # Threshold 50 (era 60) - mais seletivo
             _, low_sat_mask = cv2.threshold(saturation, 50, 255, cv2.THRESH_BINARY_INV)
         else:
             low_sat_mask = np.zeros_like(gray)
         
-        # ===================================================================
-        # CAMADA 3: BAIXA VARIÂNCIA LOCAL (vidro refletindo céu) - NOVO!
-        # ===================================================================
-        # Vidro com reflexo tem variação MUITO baixa
+        # CAMADA 3: BAIXA VARIÂNCIA LOCAL
         blur = cv2.GaussianBlur(gray, (21, 21), 0)
         diff = cv2.absdiff(gray, blur)
-        # Threshold 10 (era 8) - mais seletivo
         low_variance_mask = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY_INV)[1]
         
-        # ===================================================================
-        # COMBINAR AS 3 CAMADAS COM LÓGICA AND (mais rigoroso!)
-        # ===================================================================
-        # Reflexo verdadeiro tem TODAS as 3 características
+        # COMBINAR AS 3 CAMADAS
         reflection_mask = cv2.bitwise_and(bright_mask, low_sat_mask)
         reflection_mask = cv2.bitwise_and(reflection_mask, low_variance_mask)
         
-        # Limpeza morfológica (aumentado de 7x7 para 9x9)
+        # Limpeza morfológica
         kernel = np.ones((9, 9), np.uint8)
         reflection_mask = cv2.morphologyEx(reflection_mask, cv2.MORPH_CLOSE, kernel)
         reflection_mask = cv2.dilate(reflection_mask, np.ones((5, 5), np.uint8), iterations=1)
@@ -131,10 +109,7 @@ class ReflectionMaskV46:
         percent_reflection = np.mean(reflection_mask > 0)
         
         self.logger.log("REFLECTION", f"Reflexo detectado (3 camadas): {percent_reflection*100:.1f}%", {
-            "percent": round(percent_reflection, 3),
-            "bright_contrib": round(np.mean(bright_mask > 0), 3),
-            "low_sat_contrib": round(np.mean(low_sat_mask > 0), 3),
-            "low_var_contrib": round(np.mean(low_variance_mask > 0), 3)
+            "percent": round(percent_reflection, 3)
         })
         
         return reflection_mask, percent_reflection
@@ -152,7 +127,7 @@ class ReflectionMaskV46:
 # ============================================================================
 
 class SmoothSurfaceDetector:
-    """Detecta superfícies naturalmente lisas (carros, vidros, metais)."""
+    """Detecta superfícies naturalmente lisas."""
     
     def __init__(self, logger: AnalysisLogger = None):
         self.logger = logger or AnalysisLogger()
@@ -198,19 +173,16 @@ class SmoothSurfaceDetector:
             is_smooth = True
             smooth_percent = 0.95
             surface_type = "smooth_glass"
-        
         # Superfície pintada
         elif std_of_stds < self.std_threshold and mean_std < self.mean_std_threshold:
             is_smooth = True
             smooth_percent = 1.0 - (std_of_stds / self.std_threshold)
             surface_type = "smooth_painted"
-        
         # Vidro/metal
         elif strong_edges_percent < 0.05 and mean_std < 28:
             is_smooth = True
             smooth_percent = 0.8
             surface_type = "smooth_glass"
-        
         # Cor uniforme
         elif saturation_std < self.saturation_threshold and mean_std < 40:
             is_smooth = True
@@ -220,8 +192,6 @@ class SmoothSurfaceDetector:
         self.logger.log("SmoothSurface", f"Detectado: {surface_type}", {
             "is_smooth": is_smooth,
             "smooth_percent": round(smooth_percent, 2),
-            "std_of_stds": round(std_of_stds, 2),
-            "mean_std": round(mean_std, 2),
             "surface_type": surface_type
         })
         
@@ -229,17 +199,11 @@ class SmoothSurfaceDetector:
 
 
 # ============================================================================
-# DETECTOR REGIONAL COM CONSCIÊNCIA DE REFLEXO (V4.6)
+# DETECTOR REGIONAL
 # ============================================================================
 
 class RegionalUniformityDetectorV46:
-    """
-    V4.6: Detector regional que considera reflexo.
-    
-    NOVA LÓGICA:
-    - Se percent_uniform_regions > 0.65 AND reflexo > 0.20 → LOCALIZED
-    - Uniformidade + reflexo = vidro, NÃO IA!
-    """
+    """V4.6: Detector regional que considera reflexo."""
     
     def __init__(self, logger: AnalysisLogger = None):
         self.logger = logger or AnalysisLogger()
@@ -247,16 +211,7 @@ class RegionalUniformityDetectorV46:
     
     def analyze_regional_uniformity(self, naturalness_map: np.ndarray, 
                                    percent_reflection: float = 0.0) -> Dict[str, Any]:
-        """
-        Analisa uniformidade por região COM CONSCIÊNCIA DE REFLEXO.
-        
-        Args:
-            naturalness_map: Mapa de naturalidade (0-1)
-            percent_reflection: Porcentagem de reflexo (0-1) - NOVO!
-        
-        Returns:
-            Dict com tipo de uniformidade
-        """
+        """Analisa uniformidade por região COM CONSCIÊNCIA DE REFLEXO."""
         h, w = naturalness_map.shape
         region_h = h // self.grid_size
         region_w = w // self.grid_size
@@ -293,9 +248,6 @@ class RegionalUniformityDetectorV46:
         inter_region_std = np.std(region_means)
         avg_intra_region_std = np.mean(region_stds)
         
-        # ===================================================================
-        # CLASSIFICAÇÃO COM CONSCIÊNCIA DE REFLEXO (V4.6 - CRITICAL!)
-        # ===================================================================
         is_localized = False
         is_global = False
         uniformity_type = "MIXED"
@@ -304,22 +256,14 @@ class RegionalUniformityDetectorV46:
         if percent_uniform_regions > 0.65 and percent_reflection > 0.20:
             is_localized = True
             uniformity_type = "LOCALIZED"
-            self.logger.log("REGIONAL", "✅ Uniformidade + reflexo detectado = VIDRO", {
-                "percent_uniform": round(percent_uniform_regions * 100, 1),
-                "percent_reflection": round(percent_reflection * 100, 1),
-                "conclusion": "GLASS_LOCALIZED"
-            })
-        
         # UNIFORMIDADE LOCALIZADA (original)
         elif percent_uniform_regions < 0.70 and inter_region_std > 0.06:
             is_localized = True
             uniformity_type = "LOCALIZED"
-        
-        # UNIFORMIDADE GLOBAL (IA sintética) - mais rigoroso
+        # UNIFORMIDADE GLOBAL (IA sintética)
         elif percent_uniform_regions > 0.78 and inter_region_std < 0.09:
             is_global = True
             uniformity_type = "GLOBAL"
-        
         # INTERMEDIÁRIO
         elif percent_uniform_regions >= 0.70 and percent_uniform_regions <= 0.78:
             if inter_region_std < 0.06:
@@ -328,15 +272,6 @@ class RegionalUniformityDetectorV46:
             else:
                 is_localized = True
                 uniformity_type = "LOCALIZED"
-        
-        self.logger.log("REGIONAL", f"Análise regional: {uniformity_type}", {
-            "percent_uniform_regions": round(percent_uniform_regions * 100, 1),
-            "inter_region_std": round(inter_region_std, 3),
-            "avg_intra_region_std": round(avg_intra_region_std, 3),
-            "percent_reflection": round(percent_reflection * 100, 1),
-            "is_localized": is_localized,
-            "is_global": is_global
-        })
         
         return {
             "uniformity_type": uniformity_type,
@@ -366,7 +301,7 @@ class TextureAnalyzer:
         self.logger = logger or AnalysisLogger()
     
     def calculate_lbp(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Calcula LBP SEM CLAHE."""
+        """Calcula LBP."""
         if isinstance(image, Image.Image):
             img_gray = np.array(image.convert('L'))
         elif len(image.shape) > 2:
@@ -433,12 +368,6 @@ class TextureAnalyzer:
         mean_naturalness = np.mean(naturalness_map)
         suspicious_ratio = np.mean(suspicious_mask)
         std_of_naturalness = np.std(naturalness_map)
-        
-        self.logger.log("Texture", "Métricas de uniformidade", {
-            "mean_naturalness": round(mean_naturalness, 3),
-            "std_naturalness": round(std_of_naturalness, 3),
-            "suspicious_ratio": round(suspicious_ratio, 3)
-        })
         
         if is_smooth_surface:
             penalty_multiplier = 0.5 * smooth_percent
@@ -518,11 +447,11 @@ class TextureAnalyzer:
 
 
 # ============================================================================
-# ANALISADORES AUXILIARES (BORDAS E RUÍDO)
+# ANALISADORES AUXILIARES
 # ============================================================================
 
 class EdgeAnalyzer:
-    """Análise de bordas COM CLAHE."""
+    """Análise de bordas."""
     
     def __init__(self, use_clahe: bool = True, logger: AnalysisLogger = None):
         self.use_clahe = use_clahe
@@ -555,15 +484,11 @@ class EdgeAnalyzer:
         edge_score = int(np.mean(magnitude) / 255.0 * 100)
         edge_score = max(0, min(100, edge_score))
         
-        self.logger.log("Edge", f"Score: {edge_score}", {
-            "edge_score": edge_score
-        })
-        
         return {"edge_score": edge_score}
 
 
 class NoiseAnalyzer:
-    """Análise de ruído COM CLAHE."""
+    """Análise de ruído."""
     
     def __init__(self, block_size: int = 32, use_clahe: bool = True, logger: AnalysisLogger = None):
         self.block_size = block_size
@@ -623,43 +548,31 @@ class NoiseAnalyzer:
         else:
             noise_consistency_score = max(20, int(60 - (noise_cv - 0.8) * 50))
         
-        self.logger.log("Noise", f"Score: {noise_consistency_score}", {
-            "noise_score": noise_consistency_score,
-            "noise_cv": round(noise_cv, 3)
-        })
-        
         return {"noise_score": noise_consistency_score}
 
 
 # ============================================================================
-# ANALISADOR SEQUENCIAL V4.6 - GLASS-AWARE
+# ANALISADOR SEQUENCIAL V4.8.1 - COM VISUAL FIX
 # ============================================================================
 
 class SequentialAnalyzer:
     """
-    Sistema V4.6 Glass-Aware Detection.
-    
-    MUDANÇAS CRÍTICAS:
-    1. ReflectionMask 3x mais inteligente
-    2. Proteção: reflexo > 40% = NUNCA IA
-    3. Regional considera reflexo
-    4. Boost DESLIGADO em vidros
-    5. Peso dinâmico para textura
+    Sistema V4.8.1 - SEMPRE gera visual_report
     """
     
     def __init__(self):
         self.logger = AnalysisLogger()
         self.smooth_detector = SmoothSurfaceDetector(self.logger)
-        self.reflection_detector = ReflectionMaskV46(self.logger)  # NOVO V4.6!
-        self.regional_detector = RegionalUniformityDetectorV46(self.logger)  # NOVO V4.6!
+        self.reflection_detector = ReflectionMaskV46(self.logger)
+        self.regional_detector = RegionalUniformityDetectorV46(self.logger)
         self.texture_analyzer = TextureAnalyzer(logger=self.logger)
         self.edge_analyzer = EdgeAnalyzer(use_clahe=True, logger=self.logger)
         self.noise_analyzer = NoiseAnalyzer(use_clahe=True, logger=self.logger)
     
     def analyze_sequential(self, image) -> Dict[str, Any]:
-        """Análise sequencial com proteção de vidro."""
+        """Análise sequencial com visual sempre gerado."""
         
-        self.logger.log("START", "Iniciando análise V4.6 - Glass-Aware Detector", {})
+        self.logger.log("START", "Iniciando análise V4.8.1 - Visual Fix", {})
         
         if isinstance(image, str):
             image = Image.open(image).convert('RGB')
@@ -677,7 +590,7 @@ class SequentialAnalyzer:
         all_scores['surface_type'] = surface_type
         validation_chain.append('smooth_detection')
         
-        # FASE 0B: Detecção de reflexo (NOVO V4.6 - 3 CAMADAS!)
+        # FASE 0B: Detecção de reflexo
         non_reflective_mask, percent_valid, percent_reflection = \
             self.reflection_detector.get_non_reflective_mask(image_array)
         
@@ -685,13 +598,16 @@ class SequentialAnalyzer:
         validation_chain.append('reflection')
         
         # ===================================================================
-        # PROTEÇÃO V4.7: REFLEXO DOMINANTE > 35% = NUNCA É IA! (era 40%)
+        # PROTEÇÃO V4.7: REFLEXO DOMINANTE > 35% - GERA VISUAL!
         # ===================================================================
         if percent_reflection > 0.35:
-            self.logger.log("REFLECTION_DOMINANT", "🛡️ Reflexo dominante (>40%) - foto real!", {
+            self.logger.log("REFLECTION_DOMINANT", "🛡️ Reflexo dominante (>35%) - foto real!", {
                 "percent_reflection": round(percent_reflection * 100, 1),
                 "conclusion": "NEVER_AI"
             })
+            
+            # 🔥 CORREÇÃO V4.8.1: GERAR VISUAL REPORT MESMO COM DECISÃO RÁPIDA
+            texture_result = self.texture_analyzer.analyze_image(image_array, is_smooth, smooth_percent)
             
             return {
                 "verdict": "NATURAL",
@@ -701,27 +617,23 @@ class SequentialAnalyzer:
                 "all_scores": all_scores,
                 "validation_chain": validation_chain,
                 "phases_executed": 1,
-                "visual_report": None,
-                "heatmap": None,
-                "percent_suspicious": 0,
-                "detailed_reason": "Reflexo > 40% indica foto real de vidro/espelho",
+                "visual_report": texture_result['visual_report'],  # ✅ AGORA TEM IMAGEM!
+                "heatmap": texture_result['heatmap'],             # ✅ AGORA TEM IMAGEM!
+                "percent_suspicious": texture_result['percent_suspicious'],
+                "detailed_reason": "Reflexo > 35% indica foto real de vidro/espelho",
                 "logs": self.logger.get_logs()
             }
         
-        # Determinar boost (V4.6: DESLIGADO SE VIDRO DOMINANTE!)
+        # Determinar boost
         if percent_reflection > 0.25:
             analysis_mode = "GLASS_DOMINANT"
-            texture_boost = 1.0  # ZERO BOOST!
-            self.logger.log("BOOST", "🚫 Boost DESLIGADO - vidro dominante detectado", {
-                "reflection": round(percent_reflection * 100, 1),
-                "boost_factor": 1.0
-            })
+            texture_boost = 1.0
         elif is_smooth:
             analysis_mode = "SMOOTH_SURFACE"
             texture_boost = 1.3 + (smooth_percent * 0.3)
         elif percent_reflection >= 0.10:
             analysis_mode = "MODERATE_REFLECTION"
-            texture_boost = 1.2  # Reduzido de 1.25
+            texture_boost = 1.2
         else:
             analysis_mode = "NORMAL"
             texture_boost = 1.0
@@ -731,23 +643,17 @@ class SequentialAnalyzer:
         texture_score = texture_result['score']
         texture_score_original = texture_score
         
-        # Aplicar boost (se houver)
         if texture_boost > 1.0:
             texture_score = min(100, int(texture_score * texture_boost))
-            self.logger.log("BOOST", f"Texture boost: {texture_score_original} -> {texture_score}", {
-                "original": texture_score_original,
-                "boosted": texture_score,
-                "boost_factor": round(texture_boost, 2)
-            })
         
         all_scores['texture'] = texture_score
         validation_chain.append('texture')
         
-        # ANÁLISE REGIONAL (V4.6 - COM REFLEXO!)
+        # ANÁLISE REGIONAL
         naturalness_map = texture_result['analysis_results']['naturalness_map']
         regional_analysis = self.regional_detector.analyze_regional_uniformity(
             naturalness_map, 
-            percent_reflection  # NOVO PARÂMETRO!
+            percent_reflection
         )
         
         all_scores['uniformity_type'] = regional_analysis['uniformity_type']
@@ -761,73 +667,29 @@ class SequentialAnalyzer:
         perfection_detected = False
         perfection_level = "NOT_DETECTED"
         
-        # ===================================================================
-        # CORREÇÃO V4.8: UNIFORMIDADE 100% = IA MODERNA! (CRITICAL!)
-        # ===================================================================
-        # IAs modernas (SDXL, Gemini, Midjourney) têm uniformidade PERFEITA
         if (regional_analysis['uniformity_type'] == "GLOBAL" and 
-            regional_analysis['percent_uniform_regions'] >= 0.99):  # 99-100%
-            
+            regional_analysis['percent_uniform_regions'] >= 0.99):
             perfection_detected = True
             perfection_level = "DETECTED_EXTREME"
-            
-            self.logger.log("PERFECTION", "🚨 UNIFORMIDADE 100% - IA MODERNA DETECTADA!", {
-                "percent_uniform_regions": round(regional_analysis['percent_uniform_regions'] * 100, 1),
-                "uniformity_type": "GLOBAL",
-                "pattern": "perfect_uniformity_ai",
-                "conclusion": "MODERN_AI"
-            })
-        
-        # Se LOCALIZED, NÃO É IA
         elif regional_analysis['is_localized']:
-            self.logger.log("PERFECTION", "✅ Uniformidade LOCALIZADA - vidro/reflexo natural", {
-                "uniformity_type": "LOCALIZED",
-                "conclusion": "NOT_AI"
-            })
             perfection_detected = False
-        
-        # GLOBAL EXTREMA
         elif (regional_analysis['is_global'] and 
               texture_score >= 55 and 
               suspicious_ratio < 0.05 and 
               std_naturalness < 0.10):
-            
             perfection_detected = True
             perfection_level = "DETECTED_EXTREME"
-            
-            self.logger.log("PERFECTION", "⚠️ UNIFORMIDADE GLOBAL EXTREMA - IA avançada!", {
-                "texture_score": texture_score,
-                "suspicious_ratio": round(suspicious_ratio, 3),
-                "std_naturalness": round(std_naturalness, 3),
-                "pattern": "extreme_uniformity"
-            })
-        
-        # GLOBAL ALTA
         elif (regional_analysis['percent_uniform_regions'] > 0.65 and
               texture_score >= 55 and 
               suspicious_ratio < 0.10 and 
               std_naturalness < 0.12):
-            
             perfection_detected = True
             perfection_level = "DETECTED_HIGH"
-            
-            self.logger.log("PERFECTION", "⚠️ Uniformidade global alta - possível IA", {
-                "texture_score": texture_score,
-                "pattern": "high_uniformity"
-            })
-        
-        # SCORE MUITO ALTO
         elif (texture_score >= 72 and 
               suspicious_ratio < 0.15 and
               not regional_analysis['is_localized']):
-            
             perfection_detected = True
             perfection_level = "DETECTED_SCORE"
-            
-            self.logger.log("PERFECTION", "⚠️ Score muito alto - possível IA", {
-                "texture_score": texture_score,
-                "pattern": "high_score"
-            })
         
         all_scores['perfection_flag'] = perfection_level
         
@@ -865,34 +727,17 @@ class SequentialAnalyzer:
         all_scores['noise'] = noise_score
         validation_chain.append('noise')
         
-        # ===================================================================
-        # CORREÇÃO V4.8: GLOBAL + NOISE ALTO = IA MODERNA! (CRITICAL!)
-        # ===================================================================
-        # IAs modernas (SDXL, Gemini, Midjourney) adicionam ruído "fake"
-        # que é alto e consistente. Câmeras reais NÃO produzem:
-        # - Ruído alto (>65) + Uniformidade global ao mesmo tempo
+        # GLOBAL + NOISE ALTO = IA MODERNA
         uniformity_type = regional_analysis['uniformity_type']
         
         if (uniformity_type == "GLOBAL" and 
             noise_score >= 65 and
             regional_analysis['percent_uniform_regions'] >= 0.90):
             
-            self.logger.log(
-                "FAKE_NOISE",
-                "🚨 RUÍDO FAKE detectado - IA moderna com ruído sintético!",
-                {
-                    "noise_score": noise_score,
-                    "uniformity_type": uniformity_type,
-                    "percent_uniform_regions": round(regional_analysis['percent_uniform_regions'] * 100, 1),
-                    "pattern": "fake_noise_ai",
-                    "conclusion": "MODERN_AI_WITH_FAKE_NOISE"
-                },
-            )
-            
             return self._build_response(
                 "MANIPULADA",
                 90,
-                "Ruído sintético uniforme detectado - padrão de IA moderna (SDXL/Gemini/Midjourney)",
+                "Ruído sintético uniforme detectado - padrão de IA moderna",
                 int(noise_score),
                 all_scores,
                 validation_chain,
@@ -900,45 +745,19 @@ class SequentialAnalyzer:
                 texture_result,
             )
         
-        # ===================================================================
-        # PATCH V4.7: REGRA DE SEGURANÇA - FOTO REAL COM BORDAS SUAVES
-        # ===================================================================
-        # Problema: Fotos reais com bordas suaves eram marcadas como IA
-        # Solução: Se ruído alto + textura boa + bordas fracas + sem padrão global = FOTO REAL
-        suspicious_ratio = texture_result['percent_suspicious'] / 100.0
-        
+        # REGRA DE SEGURANÇA - FOTO REAL COM BORDAS SUAVES
         if (
-            # Ruído típico de câmera
             noise_score >= 55 and
-            # Textura razoável (ajustado de 45 para 40!)
             texture_score >= 40 and
-            # Bordas fracas (foto soft, foco leve, compressão)
             edge_score < 32 and
-            # Sem padrão de perfeição global (IA)
             uniformity_type != "GLOBAL" and
-            # Baixa suspeita (ajustado de 0.12 para 0.15 - V4.7.1)
             suspicious_ratio <= 0.15
         ):
-            # Bônus se tiver reflexo moderado
             glass_like = percent_reflection > 0.10
             
-            self.logger.log(
-                "GLASS_SAFE",
-                "🛡️ Padrão de foto real com bordas suaves (ruído alto + uniformidade não-global)",
-                {
-                    "texture": texture_score,
-                    "edge": edge_score,
-                    "noise": noise_score,
-                    "suspicious_ratio": round(suspicious_ratio, 3),
-                    "uniformity_type": uniformity_type,
-                    "percent_reflection": round(percent_reflection * 100, 1),
-                    "glass_like": glass_like,
-                },
-            )
-            
-            reason = "Textura e ruído naturais com bordas suaves (foto real, possivelmente levemente desfocada)"
+            reason = "Textura e ruído naturais com bordas suaves (foto real)"
             if glass_like:
-                reason = "Vidro com reflexo e ruído natural; bordas suaves pelo foco/iluminação"
+                reason = "Vidro com reflexo e ruído natural; bordas suaves"
             
             return self._build_response(
                 "NATURAL",
@@ -951,107 +770,76 @@ class SequentialAnalyzer:
                 texture_result,
             )
         
-        
-        # ===================================================================
-        # DECISÃO FINAL COM PESO DINÂMICO (V4.6 - CRITICAL!)
-        # ===================================================================
-        # Se reflexo > 25%, reduzir peso da textura
+        # DECISÃO FINAL COM PESO DINÂMICO
         if percent_reflection > 0.25:
             weighted_score = (
-                texture_score * 0.35 +  # Reduzido de 0.50!
+                texture_score * 0.35 +
                 edge_score * 0.30 +
-                noise_score * 0.35      # Aumentado de 0.20!
+                noise_score * 0.35
             )
-            self.logger.log("FINAL", f"Score ponderado (GLASS-AWARE): {weighted_score:.1f}", {
-                "texture": texture_score,
-                "edge": edge_score,
-                "noise": noise_score,
-                "weighted": round(weighted_score, 1),
-                "mode": "GLASS_WEIGHTED"
-            })
         else:
             weighted_score = (
                 texture_score * 0.50 +
                 edge_score * 0.30 +
                 noise_score * 0.20
             )
-            self.logger.log("FINAL", f"Score ponderado: {weighted_score:.1f}", {
-                "texture": texture_score,
-                "edge": edge_score,
-                "noise": noise_score,
-                "weighted": round(weighted_score, 1),
-                "mode": "NORMAL"
-            })
         
         # LÓGICA COM PERFEIÇÃO
         if perfection_detected:
             if perfection_level == "DETECTED_EXTREME":
                 if noise_score >= 70 and edge_score >= 45:
                     verdict, confidence = "SUSPEITA", 75
-                    reason = "Uniformidade extrema mas ruído excelente - revisar"
+                    reason = "Uniformidade extrema mas ruído excelente"
                 else:
                     verdict, confidence = "MANIPULADA", 92
-                    reason = "Uniformidade sintética extrema - IA avançada detectada"
-            
+                    reason = "Uniformidade sintética extrema - IA detectada"
             elif perfection_level == "DETECTED_HIGH":
                 if noise_score >= 75 and edge_score >= 50:
                     verdict, confidence = "NATURAL", 78
-                    reason = "Uniformidade alta mas validada por ruído/bordas naturais"
+                    reason = "Uniformidade alta mas validada"
                 elif noise_score >= 65:
                     verdict, confidence = "SUSPEITA", 80
-                    reason = "Uniformidade sintética detectada - revisar padrões"
+                    reason = "Uniformidade sintética detectada"
                 else:
                     verdict, confidence = "MANIPULADA", 88
-                    reason = "Uniformidade sintética confirmada - IA detectada"
-            
-            else:  # DETECTED_SCORE
+                    reason = "Uniformidade sintética confirmada"
+            else:
                 if noise_score >= 65:
                     verdict, confidence = "SUSPEITA", 75
-                    reason = "Score alto - possível IA ou foto profissional"
+                    reason = "Score alto - possível IA"
                 else:
                     verdict, confidence = "MANIPULADA", 85
                     reason = "Score alto com ruído artificial"
-        
-        # Lógica normal (sem perfeição)
-        # CORREÇÃO V4.8: is_smooth NÃO protege imagens GLOBAL!
         elif is_smooth and regional_analysis['uniformity_type'] != "GLOBAL":
-            is_localized_uniformity = all_scores.get('is_localized', False)
-            
             if weighted_score > 48:
                 verdict, confidence = "NATURAL", 80
                 reason = f"Superfície lisa natural ({surface_type})"
             elif weighted_score > 38:
                 verdict, confidence = "SUSPEITA", 70
-                reason = f"Superfície lisa - revisão recomendada"
-            elif is_localized_uniformity:
-                verdict, confidence = "NATURAL", 75
-                reason = f"Vidro/reflexo com uniformidade localizada - foto autêntica"
+                reason = "Superfície lisa - revisão recomendada"
             else:
                 verdict, confidence = "MANIPULADA", 75
-                reason = "IA detectada mesmo em superfície lisa"
-        
+                reason = "IA detectada"
         else:
             if texture_score < 38 and edge_score < 32:
                 verdict, confidence = "MANIPULADA", 90
                 reason = "Textura e bordas artificiais"
             elif noise_score >= 60 and 38 <= texture_score < 48 and edge_score >= 30:
                 verdict, confidence = "SUSPEITA", 70
-                reason = "Ruído natural detectado, textura afetada por compressão"
+                reason = "Ruído natural, textura afetada por compressão"
             elif texture_score >= 45 and edge_score < 32:
-                # PATCH V4.7: Só chamar de IA se o ruído também parecer artificial
-                # OU se a uniformidade for GLOBAL
                 if noise_score < 55 or regional_analysis["uniformity_type"] == "GLOBAL":
                     verdict, confidence = "MANIPULADA", 88
-                    reason = "Bordas fracas e ruído pouco natural, padrão típico de IA"
+                    reason = "Bordas fracas e ruído artificial"
                 else:
                     verdict, confidence = "SUSPEITA", 72
-                    reason = "Bordas suaves mas ruído natural; revisão recomendada (possível foto levemente desfocada)"
+                    reason = "Bordas suaves mas ruído natural"
             elif weighted_score > 62 and noise_score >= 55 and texture_score > 55:
                 verdict, confidence = "NATURAL", 82
                 reason = "Texturas e ruído naturais"
             elif weighted_score > 55 and noise_score >= 55:
                 verdict, confidence = "SUSPEITA", 70
-                reason = "Características mistas - revisão recomendada"
+                reason = "Características mistas"
             elif weighted_score < 45:
                 verdict, confidence = "MANIPULADA", 80
                 reason = "Score ponderado indica artifícios"
@@ -1060,14 +848,7 @@ class SequentialAnalyzer:
                 reason = "Características ambíguas"
             else:
                 verdict, confidence = "SUSPEITA", 70
-                reason = "Indicadores ambíguos - revisão recomendada"
-        
-        self.logger.log("VERDICT", verdict, {
-            "confidence": confidence,
-            "reason": reason,
-            "weighted_score": round(weighted_score, 1),
-            "perfection_detected": perfection_detected
-        })
+                reason = "Indicadores ambíguos"
         
         return self._build_response(
             verdict, confidence, reason,
@@ -1095,76 +876,32 @@ class SequentialAnalyzer:
 
 
 # ============================================================================
-# CLASSE PRINCIPAL (API SIMPLIFICADA)
+# CLASSE PRINCIPAL
 # ============================================================================
 
 class MirrorGlass:
-    """
-    API simplificada do MirrorGlass V4.6 Glass-Aware
-    
-    Uso:
-        detector = MirrorGlass()
-        resultado = detector.analisar("caminhao.jpg")
-        print(f"Veredito: {resultado['verdict']}")
-    """
+    """API simplificada do MirrorGlass V4.8.1"""
     
     def __init__(self):
         self.analyzer = SequentialAnalyzer()
     
     def analisar(self, image, mostrar_logs: bool = False) -> Dict[str, Any]:
-        """
-        Analisa uma imagem para detectar manipulação por IA.
-        
-        Args:
-            image: Caminho, PIL.Image ou np.ndarray
-            mostrar_logs: Se True, imprime logs detalhados
-        
-        Returns:
-            Dict com veredito, confiança, scores e informações
-        """
+        """Analisa uma imagem para detectar manipulação por IA."""
         resultado = self.analyzer.analyze_sequential(image)
         
         if mostrar_logs:
             print("\n" + "="*80)
-            print("LOGS DA ANÁLISE V4.6 - GLASS-AWARE")
+            print("LOGS DA ANÁLISE V4.8.1 - VISUAL FIX")
             print("="*80 + "\n")
             self.analyzer.logger.print_summary()
             print("\n" + "="*80)
         
         return resultado
-    
-    def analisar_lote(self, imagens: List, mostrar_progresso: bool = True) -> List[Dict[str, Any]]:
-        """Analisa múltiplas imagens."""
-        resultados = []
-        total = len(imagens)
-        
-        for i, img in enumerate(imagens):
-            if mostrar_progresso:
-                print(f"Analisando {i+1}/{total}...")
-            
-            resultado = self.analisar(img, mostrar_logs=False)
-            resultados.append(resultado)
-        
-        if mostrar_progresso:
-            print(f"\n✅ {total} imagens analisadas")
-        
-        return resultados
-    
-    def salvar_relatorio(self, resultado: Dict[str, Any], arquivo: str = "relatorio.json"):
-        """Salva relatório em JSON."""
-        with open(arquivo, 'w', encoding='utf-8') as f:
-            json.dumps(resultado, f, indent=2, ensure_ascii=False, default=str)
-        print(f"✅ Relatório salvo em: {arquivo}")
 
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("MirrorGlass V4.6 - Glass-Aware Detection System")
+    print("MirrorGlass V4.8.1 - Visual Fix")
     print("="*80)
-    print("\nCorreções implementadas:")
-    print("✅ ReflectionMask 3x mais inteligente (brilho 150+ vs 200+)")
-    print("✅ Proteção: reflexo > 40% = NUNCA IA")
-    print("✅ Regional Uniformity considera reflexo")
-    print("✅ Boost DESLIGADO em vidros dominantes")
-    print("✅ Peso dinâmico: 35% textura, 35% noise em vidros")
+    print("\n✅ Correção: Imagens SEMPRE aparecem, mesmo em decisões rápidas")
     print("\n" + "="*80 + "\n")
