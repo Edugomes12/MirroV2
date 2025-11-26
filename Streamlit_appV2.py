@@ -398,5 +398,5 @@ else:
 
 # Rodapé
 st.markdown("---")
-st.caption("MirrorGlass V4.2.0-FIXED | DEBUG MODE | Sistema com Compensação para Superfícies Lisas")
+st.caption("MirrorGlass V2.0")
 st.caption("⚠️ IMPORTANTE: Agora detecta e compensa automaticamente fotos de carros, vidros e superfícies uniformes!")
