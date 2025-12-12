@@ -7,7 +7,7 @@ from skimage.restoration import estimate_sigma
 from scipy.stats import entropy, kurtosis
 from PIL import Image
 from datetime import datetime
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 from enum import Enum
 from dataclasses import dataclass
 
@@ -52,6 +52,23 @@ class CLAHEConfig:
     noise_clahe: bool = True
     lighting_clahe: bool = True
     clip_limit: float = 2.0
+
+
+@dataclass
+class ManualConfig:
+    auto_mode: bool = True
+    enable_texture: bool = True
+    enable_edge: bool = True
+    enable_noise: bool = True
+    enable_lighting: bool = True
+    enable_boost_reflection: bool = True
+    enable_boost_smooth: bool = True
+    enable_boost_glass: bool = True
+    enable_watermark_detection: bool = True
+    custom_weights: Optional[WeightConfig] = None
+    force_scene_type: Optional[SceneType] = None
+    clahe_config: Optional[CLAHEConfig] = None
+    use_car_glass_specific: bool = True
 
 
 class WeightPresets:
@@ -227,115 +244,460 @@ def apply_clahe(img_gray: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
     return clahe.apply(img_gray)
 
 
-class CarGlassSpecificAnalyzer:
+class GeminiWatermarkDetector:
     
-    def __init__(self, logger: AnalysisLogger = None):
-        self.logger = logger or AnalysisLogger()
-        self.th_manipulated = 50
+    def __init__(self, sensitivity: str = "balanced"):
+        self.sensitivity = sensitivity
+        self.thresholds = {
+            "conservative": {"min_confidence": 0.80, "corner_ratio": 0.12},
+            "balanced": {"min_confidence": 0.70, "corner_ratio": 0.15},
+            "aggressive": {"min_confidence": 0.55, "corner_ratio": 0.18}
+        }.get(sensitivity, {"min_confidence": 0.70, "corner_ratio": 0.15})
     
-    def analyze_artifacts(self, gray: np.ndarray) -> float:
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        diff = np.abs(gray.astype(float) - blurred.astype(float))
-        block_size = 8
-        h, w = gray.shape
-        block_vars = []
-        for i in range(0, h - block_size, block_size):
-            for j in range(0, w - block_size, block_size):
-                block = diff[i:i+block_size, j:j+block_size]
-                block_vars.append(np.var(block))
-        return np.mean(block_vars) if block_vars else 0
+    def detectar_watermark(self, image: Union[np.ndarray, Image.Image]) -> Dict[str, Any]:
+        return self.detect(image)
     
-    def analyze_edge_kurtosis(self, gray: np.ndarray) -> float:
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-        return kurtosis(magnitude.flatten())
-    
-    def analyze_noise_std(self, gray: np.ndarray) -> float:
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        noise = gray.astype(float) - blurred.astype(float)
-        return np.std(noise)
-    
-    def analyze_gradient_uniformity(self, gray: np.ndarray) -> float:
-        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        angles = np.arctan2(gy, gx) * 180 / np.pi
-        hist, _ = np.histogram(angles.flatten(), bins=36, range=(-180, 180))
-        hist = hist / (hist.sum() + 1e-7)
-        return np.max(hist)
-    
-    def analyze_saturation_variation(self, image: np.ndarray) -> float:
-        if len(image.shape) != 3:
-            return 0
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        return np.std(hsv[:,:,1])
-    
-    def analyze_noise_kurtosis(self, gray: np.ndarray) -> float:
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        noise = gray.astype(float) - blurred.astype(float)
-        return kurtosis(noise.flatten())
-    
-    def analyze(self, image: np.ndarray) -> Dict[str, Any]:
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
+    def detect(self, image: Union[np.ndarray, Image.Image]) -> Dict[str, Any]:
+        img = self._prepare_image(image)
+        result = self._detect_gemini_star(img)
         
-        artifact = self.analyze_artifacts(gray)
-        edge_kurt = self.analyze_edge_kurtosis(gray)
-        noise_std = self.analyze_noise_std(gray)
-        dir_uniform = self.analyze_gradient_uniformity(gray)
-        sat_std = self.analyze_saturation_variation(image)
-        noise_kurt = self.analyze_noise_kurtosis(gray)
-        
-        manipulation_score = 0
-        artifact_norm = min(100, (artifact / 40) * 100)
-        manipulation_score += artifact_norm * 0.30
-        edge_norm = max(0, 100 - (edge_kurt / 35) * 100)
-        manipulation_score += edge_norm * 0.20
-        noise_std_norm = min(100, (noise_std / 15) * 100)
-        manipulation_score += noise_std_norm * 0.15
-        dir_norm = min(100, (dir_uniform / 0.25) * 100)
-        manipulation_score += dir_norm * 0.15
-        sat_norm = min(100, (sat_std / 60) * 100)
-        manipulation_score += sat_norm * 0.10
-        noise_kurt_norm = max(0, 100 - (noise_kurt / 25) * 100)
-        manipulation_score += noise_kurt_norm * 0.10
-        
-        manipulation_score = min(100, max(0, manipulation_score))
-        
-        if manipulation_score >= self.th_manipulated:
-            verdict = "MANIPULADA"
-            confidence = int(60 + (manipulation_score - 50) * 0.7)
-        else:
-            verdict = "NATURAL"
-            confidence = int(60 + (50 - manipulation_score) * 0.7)
-        
-        self.logger.log("CAR_GLASS_SPECIFIC", f"Score: {manipulation_score:.1f}, Veredicto: {verdict}", {
-            "manipulation_score": round(manipulation_score, 1),
-            "verdict": verdict,
-            "artifact": round(artifact, 2),
-            "edge_kurt": round(edge_kurt, 2),
-            "noise_std": round(noise_std, 2),
-            "dir_uniform": round(dir_uniform, 3),
-            "sat_std": round(sat_std, 2),
-            "noise_kurt": round(noise_kurt, 2)
-        })
+        if result["detected"]:
+            return {
+                "gemini_detected": True,
+                "confidence": round(result["confidence"], 2),
+                "reason": f"Gemini star watermark detected ({result['corner']})",
+                "manipulated": True,
+                "watermark_type": "gemini_star",
+                "location": result.get("location"),
+                "method": result.get("method", "unknown")
+            }
         
         return {
-            "verdict": verdict,
-            "confidence": min(95, confidence),
-            "manipulation_score": round(manipulation_score, 1),
-            "reason": f"Score de manipulação: {manipulation_score:.1f}/100",
-            "metrics": {
-                "artifact": round(artifact, 2),
-                "edge_kurtosis": round(edge_kurt, 2),
-                "noise_std": round(noise_std, 2),
-                "gradient_uniformity": round(dir_uniform, 3),
-                "saturation_std": round(sat_std, 2),
-                "noise_kurtosis": round(noise_kurt, 2)
-            }
+            "gemini_detected": False,
+            "confidence": 0.0,
+            "reason": "No Gemini watermark detected",
+            "manipulated": False,
+            "watermark_type": "none",
+            "location": None
         }
+    
+    def _prepare_image(self, image: Union[np.ndarray, Image.Image]) -> np.ndarray:
+        if isinstance(image, Image.Image):
+            img = np.array(image.convert('RGB'))
+        else:
+            img = image.copy()
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+        return img
+    
+    def _detect_gemini_star(self, image: np.ndarray) -> Dict[str, Any]:
+        h, w = image.shape[:2]
+        ratio = self.thresholds["corner_ratio"]
+        
+        corners = [
+            ("bottom_right", image[int(h*(1-ratio)):, int(w*(1-ratio)):], (int(w*(1-ratio)), int(h*(1-ratio)))),
+            ("bottom_left", image[int(h*(1-ratio)):, :int(w*ratio)], (0, int(h*(1-ratio)))),
+        ]
+        
+        best = {"detected": False, "confidence": 0.0, "corner": None, "location": None, "method": None}
+        
+        for corner_name, corner_img, offset in corners:
+            result = self._analyze_corner_adaptive(corner_img, corner_name)
+            if result["confidence"] > best["confidence"]:
+                if result.get("location"):
+                    x, y, ww, hh = result["location"]
+                    result["location"] = (x + offset[0], y + offset[1], ww, hh)
+                best = result
+        
+        best["detected"] = best["confidence"] >= self.thresholds["min_confidence"]
+        return best
+    
+    def _analyze_corner_adaptive(self, corner: np.ndarray, corner_name: str) -> Dict[str, Any]:
+        if corner.size == 0 or corner.shape[0] < 20 or corner.shape[1] < 20:
+            return {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None}
+        
+        gray = cv2.cvtColor(corner, cv2.COLOR_RGB2GRAY)
+        mean_val = np.mean(gray)
+        
+        if mean_val < 80:
+            result = self._detect_light_on_dark(gray, corner_name)
+        elif mean_val > 180:
+            result = self._detect_dark_on_light(gray, corner_name)
+        else:
+            result1 = self._detect_light_on_dark(gray, corner_name)
+            result2 = self._detect_dark_on_light(gray, corner_name)
+            result = result1 if result1["confidence"] > result2["confidence"] else result2
+        
+        return result
+    
+    def _detect_light_on_dark(self, gray: np.ndarray, corner_name: str) -> Dict[str, Any]:
+        best_result = {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None, "method": "light_on_dark"}
+        
+        for thresh in [90, 100, 110, 120, 130, 140, 150]:
+            mask = (gray > thresh).astype(np.uint8) * 255
+            
+            kernel = np.ones((3, 3), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            
+            result = self._find_star_shape(mask, gray, corner_name, "light_on_dark")
+            if result["confidence"] > best_result["confidence"]:
+                best_result = result
+        
+        return best_result
+    
+    def _detect_dark_on_light(self, gray: np.ndarray, corner_name: str) -> Dict[str, Any]:
+        best_result = {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None, "method": "dark_on_light"}
+        
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        for thresh in [170, 180, 190, 200, 210, 220]:
+            mask = (blurred > thresh).astype(np.uint8) * 255
+            
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            
+            result = self._find_star_shape(mask, gray, corner_name, "dark_on_light")
+            if result["confidence"] > best_result["confidence"]:
+                best_result = result
+        
+        return best_result
+    
+    def _find_star_shape(self, mask: np.ndarray, gray: np.ndarray, corner_name: str, method: str) -> Dict[str, Any]:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        best = {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None, "method": method}
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 150 or area > 12000:
+                continue
+            
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter == 0:
+                continue
+            
+            circularity = 4 * np.pi * area / (perimeter ** 2)
+            
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / hull_area if hull_area > 0 else 0
+            
+            x, y, bw, bh = cv2.boundingRect(contour)
+            aspect = bw / bh if bh > 0 else 0
+            
+            is_gemini_star = (
+                0.30 < circularity < 0.65 and
+                0.50 < solidity < 0.88 and
+                0.75 < aspect < 1.35 and
+                bw >= 18 and bh >= 18
+            )
+            
+            if is_gemini_star:
+                base_score = 0.45
+                
+                if 0.38 < circularity < 0.55:
+                    base_score += 0.15
+                elif 0.30 < circularity < 0.65:
+                    base_score += 0.08
+                
+                if 0.60 < solidity < 0.78:
+                    base_score += 0.15
+                elif 0.50 < solidity < 0.88:
+                    base_score += 0.08
+                
+                if 0.90 < aspect < 1.12:
+                    base_score += 0.10
+                
+                symmetry = self._check_symmetry(gray, (x, y, bw, bh))
+                if symmetry > 0.60:
+                    base_score += 0.20
+                elif symmetry > 0.45:
+                    base_score += 0.10
+                
+                if self._has_four_points(contour):
+                    base_score += 0.15
+                
+                if base_score > best["confidence"]:
+                    best = {
+                        "detected": False,
+                        "confidence": min(1.0, base_score),
+                        "corner": corner_name,
+                        "location": (x, y, bw, bh),
+                        "method": method
+                    }
+        
+        return best
+    
+    def _check_symmetry(self, gray: np.ndarray, location: Tuple) -> float:
+        if location is None:
+            return 0.0
+        
+        x, y, w, h = location
+        cx, cy = x + w // 2, y + h // 2
+        half = max(w, h) // 2 + 3
+        
+        h_img, w_img = gray.shape
+        if cx - half < 0 or cx + half >= w_img or cy - half < 0 or cy + half >= h_img:
+            return 0.0
+        
+        roi = gray[cy - half:cy + half, cx - half:cx + half].astype(np.float32)
+        if roi.size == 0 or roi.shape[0] < 8:
+            return 0.0
+        
+        rot90 = cv2.rotate(roi, cv2.ROTATE_90_CLOCKWISE)
+        rot180 = cv2.rotate(roi, cv2.ROTATE_180)
+        
+        min_size = min(roi.shape[0], roi.shape[1], rot90.shape[0], rot90.shape[1])
+        roi = roi[:min_size, :min_size]
+        rot90 = rot90[:min_size, :min_size]
+        rot180 = rot180[:min_size, :min_size]
+        
+        diff90 = np.mean(np.abs(roi - rot90)) / 255
+        diff180 = np.mean(np.abs(roi - rot180)) / 255
+        
+        return max(0, 1 - (diff90 + diff180) / 2 * 2.5)
+    
+    def _has_four_points(self, contour: np.ndarray) -> bool:
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        return 6 <= len(approx) <= 12
+    
+    def _verify_star_pattern(self, gray: np.ndarray, location: Tuple) -> bool:
+        if location is None:
+            return False
+        
+        x, y, w, h = location
+        cx, cy = x + w // 2, y + h // 2
+        radius = max(w, h) // 2
+        
+        h_img, w_img = gray.shape
+        if cx - radius < 0 or cx + radius >= w_img or cy - radius < 0 or cy + radius >= h_img:
+            return False
+        
+        center_val = gray[cy, cx] if 0 <= cy < h_img and 0 <= cx < w_img else 0
+        edge_vals = []
+        
+        for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+            rad = np.radians(angle)
+            ex = int(cx + radius * 0.8 * np.cos(rad))
+            ey = int(cy + radius * 0.8 * np.sin(rad))
+            if 0 <= ey < h_img and 0 <= ex < w_img:
+                edge_vals.append(gray[ey, ex])
+        
+        if len(edge_vals) < 4:
+            return False
+        
+        return center_val > np.mean(edge_vals) + 10
+    
+    def analyze_batch(self, images: List[Union[np.ndarray, Image.Image]]) -> List[Dict[str, Any]]:
+        return [self.detect(img) for img in images]
+
+
+    
+    def __init__(self, sensitivity: str = "balanced"):
+        self.sensitivity = sensitivity
+        self.thresholds = {
+            "conservative": {"min_confidence": 0.85, "corner_ratio": 0.12},
+            "balanced": {"min_confidence": 0.75, "corner_ratio": 0.15},
+            "aggressive": {"min_confidence": 0.60, "corner_ratio": 0.18}
+        }.get(sensitivity, {"min_confidence": 0.75, "corner_ratio": 0.15})
+    
+    def detectar_watermark(self, image: Union[np.ndarray, Image.Image]) -> Dict[str, Any]:
+        return self.detect(image)
+    
+    def detect(self, image: Union[np.ndarray, Image.Image]) -> Dict[str, Any]:
+        img = self._prepare_image(image)
+        result = self._detect_gemini_star(img)
+        
+        if result["detected"]:
+            return {
+                "gemini_detected": True,
+                "confidence": round(result["confidence"], 2),
+                "reason": f"Gemini star watermark detected ({result['corner']})",
+                "manipulated": True,
+                "watermark_type": "gemini_star",
+                "location": result.get("location")
+            }
+        
+        return {
+            "gemini_detected": False,
+            "confidence": 0.0,
+            "reason": "No Gemini watermark detected",
+            "manipulated": False,
+            "watermark_type": "none",
+            "location": None
+        }
+    
+    def _prepare_image(self, image: Union[np.ndarray, Image.Image]) -> np.ndarray:
+        if isinstance(image, Image.Image):
+            img = np.array(image.convert('RGB'))
+        else:
+            img = image.copy()
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+        return img
+    
+    def _detect_gemini_star(self, image: np.ndarray) -> Dict[str, Any]:
+        h, w = image.shape[:2]
+        ratio = self.thresholds["corner_ratio"]
+        
+        corners = [
+            ("bottom_right", image[int(h*(1-ratio)):, int(w*(1-ratio)):], (int(w*(1-ratio)), int(h*(1-ratio)))),
+            ("bottom_left", image[int(h*(1-ratio)):, :int(w*ratio)], (0, int(h*(1-ratio)))),
+        ]
+        
+        best = {"detected": False, "confidence": 0.0, "corner": None, "location": None}
+        
+        for corner_name, corner_img, offset in corners:
+            result = self._analyze_corner(corner_img, corner_name)
+            if result["confidence"] > best["confidence"]:
+                if result.get("location"):
+                    x, y, ww, hh = result["location"]
+                    result["location"] = (x + offset[0], y + offset[1], ww, hh)
+                best = result
+        
+        best["detected"] = best["confidence"] >= self.thresholds["min_confidence"]
+        return best
+    
+    def _analyze_corner(self, corner: np.ndarray, corner_name: str) -> Dict[str, Any]:
+        if corner.size == 0 or corner.shape[0] < 20 or corner.shape[1] < 20:
+            return {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None}
+        
+        gray = cv2.cvtColor(corner, cv2.COLOR_RGB2GRAY)
+        star_match = self._find_gemini_star_shape(gray)
+        
+        if star_match is None:
+            return {"detected": False, "confidence": 0.0, "corner": corner_name, "location": None}
+        
+        total_score = star_match["base_score"]
+        
+        symmetry = self._check_symmetry(gray, star_match["location"])
+        if symmetry > 0.65:
+            total_score += 0.25
+        elif symmetry > 0.50:
+            total_score += 0.15
+        
+        if self._verify_star_pattern(gray, star_match["location"]):
+            total_score += 0.20
+        
+        return {
+            "detected": False,
+            "confidence": min(1.0, total_score),
+            "corner": corner_name,
+            "location": star_match["location"]
+        }
+    
+    def _find_gemini_star_shape(self, gray: np.ndarray) -> Optional[Dict]:
+        for thresh in [140, 150, 160, 170, 180]:
+            mask = (gray > thresh).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < 200 or area > 10000:
+                    continue
+                
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter == 0:
+                    continue
+                
+                circularity = 4 * np.pi * area / (perimeter ** 2)
+                hull = cv2.convexHull(contour)
+                hull_area = cv2.contourArea(hull)
+                solidity = area / hull_area if hull_area > 0 else 0
+                x, y, bw, bh = cv2.boundingRect(contour)
+                aspect = bw / bh if bh > 0 else 0
+                
+                is_gemini_star = (
+                    0.38 < circularity < 0.55 and
+                    0.60 < solidity < 0.78 and
+                    0.85 < aspect < 1.18 and
+                    bw >= 25 and bh >= 25
+                )
+                
+                if is_gemini_star:
+                    base_score = 0.50
+                    if 0.42 < circularity < 0.50:
+                        base_score += 0.10
+                    if 0.65 < solidity < 0.73:
+                        base_score += 0.10
+                    if 0.92 < aspect < 1.08:
+                        base_score += 0.05
+                    
+                    return {
+                        "contour": contour,
+                        "location": (x, y, bw, bh),
+                        "circularity": circularity,
+                        "solidity": solidity,
+                        "area": area,
+                        "base_score": base_score
+                    }
+        return None
+    
+    def _check_symmetry(self, gray: np.ndarray, location: Tuple) -> float:
+        if location is None:
+            return 0.0
+        
+        x, y, w, h = location
+        cx, cy = x + w // 2, y + h // 2
+        half = max(w, h) // 2 + 3
+        
+        h_img, w_img = gray.shape
+        if cx - half < 0 or cx + half >= w_img or cy - half < 0 or cy + half >= h_img:
+            return 0.0
+        
+        roi = gray[cy - half:cy + half, cx - half:cx + half].astype(np.float32)
+        if roi.size == 0 or roi.shape[0] < 8:
+            return 0.0
+        
+        rot90 = cv2.rotate(roi, cv2.ROTATE_90_CLOCKWISE)
+        rot180 = cv2.rotate(roi, cv2.ROTATE_180)
+        
+        min_size = min(roi.shape[0], roi.shape[1], rot90.shape[0], rot90.shape[1])
+        roi = roi[:min_size, :min_size]
+        rot90 = rot90[:min_size, :min_size]
+        rot180 = rot180[:min_size, :min_size]
+        
+        diff90 = np.mean(np.abs(roi - rot90)) / 255
+        diff180 = np.mean(np.abs(roi - rot180)) / 255
+        
+        return max(0, 1 - (diff90 + diff180) / 2 * 3)
+    
+    def _verify_star_pattern(self, gray: np.ndarray, location: Tuple) -> bool:
+        if location is None:
+            return False
+        
+        x, y, w, h = location
+        cx, cy = x + w // 2, y + h // 2
+        radius = max(w, h) // 2
+        
+        h_img, w_img = gray.shape
+        if cx - radius < 0 or cx + radius >= w_img or cy - radius < 0 or cy + radius >= h_img:
+            return False
+        
+        center_val = gray[cy, cx] if 0 <= cy < h_img and 0 <= cx < w_img else 0
+        edge_vals = []
+        
+        for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+            rad = np.radians(angle)
+            ex = int(cx + radius * 0.8 * np.cos(rad))
+            ey = int(cy + radius * 0.8 * np.sin(rad))
+            if 0 <= ey < h_img and 0 <= ex < w_img:
+                edge_vals.append(gray[ey, ex])
+        
+        if len(edge_vals) < 4:
+            return False
+        
+        return center_val > np.mean(edge_vals) + 15
+    
+    def analyze_batch(self, images: List[Union[np.ndarray, Image.Image]]) -> List[Dict[str, Any]]:
+        return [self.detect(img) for img in images]
 
 
 class CarDetector:
@@ -343,14 +705,6 @@ class CarDetector:
     def __init__(self):
         self.car_cascade = None
         self.cascade_available = False
-        try:
-            cascade_path = cv2.data.haarcascades + 'haarcascade_car.xml'
-            cascade = cv2.CascadeClassifier(cascade_path)
-            if not cascade.empty():
-                self.car_cascade = cascade
-                self.cascade_available = True
-        except Exception:
-            pass
     
     def detect(self, image: np.ndarray) -> Tuple[bool, float, List]:
         if isinstance(image, Image.Image):
@@ -362,7 +716,6 @@ class CarDetector:
             gray = image.copy()
         
         h, w = gray.shape
-        
         indicators = 0
         total_checks = 4
         
@@ -370,33 +723,19 @@ class CarDetector:
         lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=50, maxLineGap=10)
         
         if lines is not None:
-            horizontal_lines = 0
-            vertical_lines = 0
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                angle = abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
-                if angle < 15 or angle > 165:
-                    horizontal_lines += 1
-                elif 75 < angle < 105:
-                    vertical_lines += 1
-            
+            horizontal_lines = sum(1 for l in lines if abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) < 15 or abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) > 165)
+            vertical_lines = sum(1 for l in lines if 75 < abs(np.arctan2(l[0][3]-l[0][1], l[0][2]-l[0][0]) * 180 / np.pi) < 105)
             if horizontal_lines > 5 and vertical_lines > 3:
                 indicators += 1
         
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV) if len(image.shape) == 3 else None
-        
-        if hsv is not None:
-            metallic_lower = np.array([0, 0, 100])
-            metallic_upper = np.array([180, 50, 200])
-            metallic_mask = cv2.inRange(hsv, metallic_lower, metallic_upper)
-            metallic_ratio = np.mean(metallic_mask > 0)
-            
-            if metallic_ratio > 0.15:
+        if len(image.shape) == 3:
+            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            metallic_mask = cv2.inRange(hsv, np.array([0, 0, 100]), np.array([180, 50, 200]))
+            if np.mean(metallic_mask > 0) > 0.15:
                 indicators += 1
         
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         large_contours = [c for c in contours if cv2.contourArea(c) > (h * w * 0.01)]
-        
         for contour in large_contours[:5]:
             x, y, cw, ch = cv2.boundingRect(contour)
             aspect = cw / ch if ch > 0 else 0
@@ -406,18 +745,12 @@ class CarDetector:
         
         lower_third = gray[int(h*0.6):, :]
         if lower_third.size > 0:
-            circles = cv2.HoughCircles(
-                lower_third, cv2.HOUGH_GRADIENT, 1, 50,
-                param1=50, param2=30, minRadius=10, maxRadius=100
-            )
-            
+            circles = cv2.HoughCircles(lower_third, cv2.HOUGH_GRADIENT, 1, 50, param1=50, param2=30, minRadius=10, maxRadius=100)
             if circles is not None and len(circles[0]) >= 2:
                 indicators += 1
         
         confidence = indicators / total_checks
-        is_car = confidence >= 0.5
-        
-        return is_car, confidence, []
+        return confidence >= 0.5, confidence, []
 
 
 class GlassDetector:
@@ -435,53 +768,36 @@ class GlassDetector:
         
         indicators = 0
         total_checks = 4
+        h, w = gray.shape
         
         block_size = 32
-        h, w = gray.shape
-        low_texture_blocks = 0
-        total_blocks = 0
-        
-        for i in range(0, h - block_size, block_size):
-            for j in range(0, w - block_size, block_size):
-                block = gray[i:i+block_size, j:j+block_size]
-                if np.std(block) < 20:
-                    low_texture_blocks += 1
-                total_blocks += 1
-        
-        low_texture_ratio = low_texture_blocks / total_blocks if total_blocks > 0 else 0
-        if low_texture_ratio > 0.3:
+        low_texture_blocks = sum(1 for i in range(0, h - block_size, block_size) 
+                                 for j in range(0, w - block_size, block_size) 
+                                 if np.std(gray[i:i+block_size, j:j+block_size]) < 20)
+        total_blocks = max(1, ((h - block_size) // block_size) * ((w - block_size) // block_size))
+        if low_texture_blocks / total_blocks > 0.3:
             indicators += 1
         
         if hsv is not None:
-            saturation = hsv[:, :, 1]
-            low_sat_ratio = np.mean(saturation < 40)
+            low_sat_ratio = np.mean(hsv[:, :, 1] < 40)
             if low_sat_ratio > 0.4:
                 indicators += 1
         
         _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
         bright_ratio = np.mean(bright > 0)
-        
-        if bright_ratio > 0.05 and bright_ratio < 0.4:
+        if 0.05 < bright_ratio < 0.4:
             indicators += 1
         
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
         magnitude = np.sqrt(grad_x**2 + grad_y**2)
-        
-        smooth_ratio = np.mean(magnitude < 10)
-        if smooth_ratio > 0.5:
+        if np.mean(magnitude < 10) > 0.5:
             indicators += 1
         
         confidence = indicators / total_checks
         is_glass = confidence >= 0.5
-        
-        glass_type = "unknown"
-        if is_glass:
-            if bright_ratio > 0.15:
-                glass_type = "window"
-            else:
-                glass_type = "dark_glass"
+        glass_type = "window" if bright_ratio > 0.15 else "dark_glass" if is_glass else "unknown"
         
         return is_glass, confidence, glass_type
 
@@ -505,7 +821,6 @@ class ReflectionDetector:
         
         _, bright = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
         _, low_sat = cv2.threshold(saturation, 50, 255, cv2.THRESH_BINARY_INV)
-        
         reflection_mask = cv2.bitwise_and(bright, low_sat)
         percent = np.mean(reflection_mask > 0)
         
@@ -522,7 +837,6 @@ class ReflectionDetector:
             areas = [cv2.contourArea(c) for c in contours]
             max_area = max(areas)
             total_area = sum(areas)
-            
             if max_area > total_area * 0.5:
                 reflection_info["is_specular"] = True
             else:
@@ -563,21 +877,13 @@ class SmoothSurfaceDetector:
         std_of_stds = np.std(block_stds) if block_stds else 50
         
         if mean_std < 15 and std_of_stds < 10:
-            is_smooth = True
-            smooth_percent = 0.9
-            surface_type = "glass"
+            is_smooth, smooth_percent, surface_type = True, 0.9, "glass"
         elif mean_std < 25 and std_of_stds < 15:
-            is_smooth = True
-            smooth_percent = 0.7
-            surface_type = "painted_wall"
+            is_smooth, smooth_percent, surface_type = True, 0.7, "painted_wall"
         elif mean_std < 35:
-            is_smooth = True
-            smooth_percent = 0.5
-            surface_type = "semi_smooth"
+            is_smooth, smooth_percent, surface_type = True, 0.5, "semi_smooth"
         else:
-            is_smooth = False
-            smooth_percent = 0.0
-            surface_type = "textured"
+            is_smooth, smooth_percent, surface_type = False, 0.0, "textured"
         
         if self.logger:
             self.logger.log("SMOOTH", f"Superfície: {surface_type}", {
@@ -602,7 +908,6 @@ class DocumentDetector:
         total_area = h * w
         
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        
         lower_white = np.array([0, 0, 195])
         upper_white = np.array([180, 50, 255])
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
@@ -611,7 +916,6 @@ class DocumentDetector:
         white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
         
         contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         documents = []
         
         for contour in contours:
@@ -686,37 +990,26 @@ class SceneClassifier:
         
         if has_car and has_glass and has_reflection:
             return SceneType.CAR_GLASS_REFLECTION
-        
         if has_car and has_glass:
             return SceneType.CAR_GLASS
-        
         if has_car and has_reflection:
             return SceneType.CAR_REFLECTION
-        
         if has_car and is_wall:
             return SceneType.CAR_SMOOTH_WALL
-        
         if has_car and has_document:
             return SceneType.CAR_DOCUMENT
-        
         if has_glass and has_reflection:
             return SceneType.GLASS_REFLECTION
-        
         if has_glass and is_wall:
             return SceneType.GLASS_WALL
-        
         if has_glass and has_document:
             return SceneType.GLASS_DOCUMENT
-        
         if has_car:
             return SceneType.CAR
-        
         if has_glass:
             return SceneType.GLASS
-        
         if has_document:
             return SceneType.DOCUMENT
-        
         if is_smooth:
             return SceneType.SMOOTH_SURFACE
         
@@ -1005,20 +1298,115 @@ class LightingAnalyzer:
         }
 
 
-@dataclass
-class ManualConfig:
-    auto_mode: bool = True
-    enable_texture: bool = True
-    enable_edge: bool = True
-    enable_noise: bool = True
-    enable_lighting: bool = True
-    enable_boost_reflection: bool = True
-    enable_boost_smooth: bool = True
-    enable_boost_glass: bool = True
-    custom_weights: Optional[WeightConfig] = None
-    force_scene_type: Optional[SceneType] = None
-    clahe_config: Optional[CLAHEConfig] = None
-    use_car_glass_specific: bool = True
+class CarGlassSpecificAnalyzer:
+    
+    def __init__(self, logger: AnalysisLogger = None):
+        self.logger = logger or AnalysisLogger()
+        self.th_manipulated = 50
+    
+    def analyze_artifacts(self, gray: np.ndarray) -> float:
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        diff = np.abs(gray.astype(float) - blurred.astype(float))
+        block_size = 8
+        h, w = gray.shape
+        block_vars = []
+        for i in range(0, h - block_size, block_size):
+            for j in range(0, w - block_size, block_size):
+                block = diff[i:i+block_size, j:j+block_size]
+                block_vars.append(np.var(block))
+        return np.mean(block_vars) if block_vars else 0
+    
+    def analyze_edge_kurtosis(self, gray: np.ndarray) -> float:
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+        return kurtosis(magnitude.flatten())
+    
+    def analyze_noise_std(self, gray: np.ndarray) -> float:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        noise = gray.astype(float) - blurred.astype(float)
+        return np.std(noise)
+    
+    def analyze_gradient_uniformity(self, gray: np.ndarray) -> float:
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        angles = np.arctan2(gy, gx) * 180 / np.pi
+        hist, _ = np.histogram(angles.flatten(), bins=36, range=(-180, 180))
+        hist = hist / (hist.sum() + 1e-7)
+        return np.max(hist)
+    
+    def analyze_saturation_variation(self, image: np.ndarray) -> float:
+        if len(image.shape) != 3:
+            return 0
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        return np.std(hsv[:,:,1])
+    
+    def analyze_noise_kurtosis(self, gray: np.ndarray) -> float:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        noise = gray.astype(float) - blurred.astype(float)
+        return kurtosis(noise.flatten())
+    
+    def analyze(self, image: np.ndarray) -> Dict[str, Any]:
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image.copy()
+        
+        artifact = self.analyze_artifacts(gray)
+        edge_kurt = self.analyze_edge_kurtosis(gray)
+        noise_std = self.analyze_noise_std(gray)
+        dir_uniform = self.analyze_gradient_uniformity(gray)
+        sat_std = self.analyze_saturation_variation(image)
+        noise_kurt = self.analyze_noise_kurtosis(gray)
+        
+        manipulation_score = 0
+        artifact_norm = min(100, (artifact / 40) * 100)
+        manipulation_score += artifact_norm * 0.30
+        edge_norm = max(0, 100 - (edge_kurt / 35) * 100)
+        manipulation_score += edge_norm * 0.20
+        noise_std_norm = min(100, (noise_std / 15) * 100)
+        manipulation_score += noise_std_norm * 0.15
+        dir_norm = min(100, (dir_uniform / 0.25) * 100)
+        manipulation_score += dir_norm * 0.15
+        sat_norm = min(100, (sat_std / 60) * 100)
+        manipulation_score += sat_norm * 0.10
+        noise_kurt_norm = max(0, 100 - (noise_kurt / 25) * 100)
+        manipulation_score += noise_kurt_norm * 0.10
+        
+        manipulation_score = min(100, max(0, manipulation_score))
+        
+        if manipulation_score >= self.th_manipulated:
+            verdict = "MANIPULADA"
+            confidence = int(60 + (manipulation_score - 50) * 0.7)
+        else:
+            verdict = "NATURAL"
+            confidence = int(60 + (50 - manipulation_score) * 0.7)
+        
+        self.logger.log("CAR_GLASS_SPECIFIC", f"Score: {manipulation_score:.1f}, Veredicto: {verdict}", {
+            "manipulation_score": round(manipulation_score, 1),
+            "verdict": verdict,
+            "artifact": round(artifact, 2),
+            "edge_kurt": round(edge_kurt, 2),
+            "noise_std": round(noise_std, 2),
+            "dir_uniform": round(dir_uniform, 3),
+            "sat_std": round(sat_std, 2),
+            "noise_kurt": round(noise_kurt, 2)
+        })
+        
+        return {
+            "verdict": verdict,
+            "confidence": min(95, confidence),
+            "manipulation_score": round(manipulation_score, 1),
+            "reason": f"Score de manipulação: {manipulation_score:.1f}/100",
+            "metrics": {
+                "artifact": round(artifact, 2),
+                "edge_kurtosis": round(edge_kurt, 2),
+                "noise_std": round(noise_std, 2),
+                "gradient_uniformity": round(dir_uniform, 3),
+                "saturation_std": round(sat_std, 2),
+                "noise_kurtosis": round(noise_kurt, 2)
+            }
+        }
 
 
 class MirrorGlass:
@@ -1054,6 +1442,9 @@ class MirrorGlass:
         self.reflection_detector = ReflectionDetector(logger=self.logger)
         self.smooth_detector = SmoothSurfaceDetector(logger=self.logger)
         self.car_glass_analyzer = CarGlassSpecificAnalyzer(logger=self.logger)
+        
+        watermark_sensitivity = {"Conservador": "conservative", "Agressivo": "aggressive"}.get(detection_mode, "balanced")
+        self.watermark_detector = GeminiWatermarkDetector(sensitivity=watermark_sensitivity)
         
         self._base_thresholds = self._get_base_thresholds()
     
@@ -1096,6 +1487,37 @@ class MirrorGlass:
             image_array = np.array(image)
         else:
             image_array = image
+        
+        if self.manual_config.enable_watermark_detection:
+            watermark_result = self.watermark_detector.detect(image_array)
+            
+            if watermark_result["gemini_detected"]:
+                self.logger.log("WATERMARK", "Gemini watermark detected - MANIPULADA", watermark_result)
+                
+                result = {
+                    "verdict": "MANIPULADA",
+                    "confidence": int(watermark_result["confidence"] * 100),
+                    "reason": watermark_result["reason"],
+                    "main_score": 0,
+                    "all_scores": {"watermark": watermark_result["confidence"] * 100},
+                    "validation_chain": ["watermark"],
+                    "phases_executed": 0,
+                    "visual_report": None,
+                    "heatmap": None,
+                    "percent_suspicious": 100,
+                    "detailed_reason": f"Watermark do Gemini detectado com {watermark_result['confidence']*100:.0f}% de confiança",
+                    "logs": self.logger.get_logs(),
+                    "scene_type": "watermark_detected",
+                    "gemini_watermark": watermark_result,
+                    "detection_info": {},
+                    "weight_config": {},
+                    "manual_config": {"auto_mode": self.manual_config.auto_mode, "watermark_detection": True}
+                }
+                
+                if show_logs:
+                    self._print_logs(result)
+                
+                return result
         
         if self.manual_config.auto_mode:
             scene_type, detection_info = self.scene_classifier.classify(image_array)
@@ -1150,68 +1572,63 @@ class MirrorGlass:
             "enable_edge": self.manual_config.enable_edge,
             "enable_noise": self.manual_config.enable_noise,
             "enable_lighting": self.manual_config.enable_lighting,
-            "enable_boost_reflection": self.manual_config.enable_boost_reflection,
-            "enable_boost_smooth": self.manual_config.enable_boost_smooth,
-            "enable_boost_glass": self.manual_config.enable_boost_glass,
-            "use_car_glass_specific": self.manual_config.use_car_glass_specific
+            "use_car_glass_specific": use_car_glass_specific,
+            "watermark_detection": self.manual_config.enable_watermark_detection
         }
-        result["clahe_config"] = {
-            "texture_clahe": clahe_cfg.texture_clahe,
-            "edge_clahe": clahe_cfg.edge_clahe,
-            "noise_clahe": clahe_cfg.noise_clahe,
-            "lighting_clahe": clahe_cfg.lighting_clahe,
-            "clip_limit": clahe_cfg.clip_limit
+        result["clahe_status"] = {
+            "texture": clahe_cfg.texture_clahe,
+            "edge": clahe_cfg.edge_clahe,
+            "noise": clahe_cfg.noise_clahe,
+            "lighting": clahe_cfg.lighting_clahe
         }
+        result["gemini_watermark"] = {"gemini_detected": False}
         
         if show_logs:
             self._print_logs(result)
         
         return result
     
-    def _run_car_glass_analysis(self, image: np.ndarray, scene_type: SceneType, detection_info: Dict) -> Dict[str, Any]:
+    def _run_car_glass_analysis(self, image: np.ndarray, scene_type: SceneType, 
+                                 detection_info: Dict) -> Dict[str, Any]:
         cg_result = self.car_glass_analyzer.analyze(image)
         texture_result = self.texture_analyzer.analyze_image(image)
-        
-        all_scores = {
-            "manipulation_score": cg_result["manipulation_score"],
-            "texture": texture_result["score"],
-            **cg_result["metrics"]
-        }
         
         return {
             "verdict": cg_result["verdict"],
             "confidence": cg_result["confidence"],
             "reason": cg_result["reason"],
-            "main_score": 100 - int(cg_result["manipulation_score"]),
-            "all_scores": all_scores,
+            "main_score": int(100 - cg_result["manipulation_score"]),
+            "all_scores": {
+                "car_glass_specific": cg_result["manipulation_score"],
+                "texture": texture_result["score"]
+            },
             "validation_chain": ["car_glass_specific"],
             "phases_executed": 1,
-            "visual_report": texture_result["visual_report"],
-            "heatmap": texture_result["heatmap"],
-            "percent_suspicious": cg_result["manipulation_score"],
-            "detailed_reason": f"Análise CAR_GLASS: {cg_result['reason']}",
+            "visual_report": texture_result.get("visual_report"),
+            "heatmap": texture_result.get("heatmap"),
+            "percent_suspicious": int(cg_result["manipulation_score"]),
+            "detailed_reason": cg_result["reason"],
             "logs": self.logger.get_logs(),
-            "clahe_status": {"texture": texture_result.get("clahe_used", False)},
-            "car_glass_analysis": cg_result
+            "car_glass_metrics": cg_result.get("metrics", {})
         }
     
-    def _run_analysis(self, image: np.ndarray, config: WeightConfig, scene_type: SceneType = SceneType.UNKNOWN) -> Dict[str, Any]:
+    def _run_analysis(self, image: np.ndarray, config: WeightConfig, 
+                      scene_type: SceneType) -> Dict[str, Any]:
+        
         all_scores = {}
         validation_chain = []
         clahe_status = {}
         
-        reflection_pct, has_reflection, _ = self.reflection_detector.detect(image)
+        reflection_pct, has_reflection, reflection_info = self.reflection_detector.detect(image)
         smooth_pct, is_smooth, surface_type = self.smooth_detector.detect(image)
+        
+        all_scores['reflection'] = reflection_pct * 100
+        all_scores['smooth'] = smooth_pct * 100
         
         reflection_percent = reflection_pct * 100
         
-        all_scores['reflection'] = round(reflection_percent, 1)
-        all_scores['smooth_surface'] = round(smooth_pct * 100, 1)
-        all_scores['surface_type'] = surface_type
-        
         texture_result = None
         texture_score = 50
-        
         if self.manual_config.enable_texture:
             texture_result = self.texture_analyzer.analyze_image(image)
             texture_score = texture_result['score']
@@ -1219,29 +1636,47 @@ class MirrorGlass:
             validation_chain.append('texture')
             clahe_status['texture'] = texture_result.get('clahe_used', False)
         
+        # NOVA REGRA: CAR_GLASS_REFLECTION com textura suspeita > 40%
+        if texture_result is not None:
+            texture_suspicious_percent = texture_result["suspicious_ratio"] * 100
+            all_scores["texture_suspicious_percent"] = texture_suspicious_percent
+            
+            if scene_type == SceneType.CAR_GLASS_REFLECTION and texture_suspicious_percent <= 10 and reflection_percent > 20.99 and reflection_percent < 40 or texture_suspicious_percent < 1 and reflection_percent <= 18:
+                self.logger.log("CAR_GLASS_TEXTURE_RULE", 
+                    f"Regra de textura ativada: {texture_suspicious_percent:.1f} em CAR_GLASS_REFLECTION",
+                    {
+                        "texture_suspicious_percent": round(texture_suspicious_percent, 2),
+                        "scene_type": scene_type.value,
+                        "threshold": 40
+                    })
+                return self._build_response(
+                    verdict="MANIPULADA",
+                    confidence=90,
+                    reason=f"Textura artificial suspeita na cena car_glass_reflection ({texture_suspicious_percent:.1f}%)",
+                    main_score=int(texture_score),
+                    all_scores=all_scores,
+                    validation_chain=validation_chain,
+                    phases_executed=1,
+                    visual_report=texture_result.get('visual_report'),
+                    heatmap=texture_result.get('heatmap'),
+                    clahe_status=clahe_status
+                )
+        
         weighted_texture = texture_score * config.weight_texture
         
-        if self.manual_config.enable_boost_glass and is_smooth and reflection_pct > 0.10:
-            weighted_texture += config.boost_glass
-        elif self.manual_config.enable_boost_smooth and is_smooth:
-            weighted_texture += config.boost_smooth
-        
-        if self.manual_config.enable_boost_reflection and 0.15 <= reflection_pct <= 0.40:
+        if self.manual_config.enable_boost_reflection and has_reflection:
             weighted_texture += config.boost_reflection
         
-        weighted_texture = min(100, weighted_texture)
+        if self.manual_config.enable_boost_smooth and is_smooth:
+            weighted_texture += config.boost_smooth
         
-        force_continue_to_phase2 = texture_score < 50
-        force_continue_to_phase3 = reflection_percent < 20
+        force_continue_to_phase3 = (
+            scene_type == SceneType.CAR_GLASS_REFLECTION and
+            reflection_percent > 12 and
+            reflection_percent < 25
+        )
         
-        self.logger.log("FORCE_CONTINUE", f"Textura<30: {force_continue_to_phase2}, Reflexo<=20%: {force_continue_to_phase3}", {
-            "texture_score": texture_score,
-            "reflection_percent": round(reflection_percent, 2),
-            "force_phase2": force_continue_to_phase2,
-            "force_phase3": force_continue_to_phase3
-        })
-        
-        if weighted_texture < config.th_texture_manipulated and not force_continue_to_phase2:
+        if weighted_texture < config.th_texture_manipulated and not force_continue_to_phase3:
             return self._build_response(
                 verdict="MANIPULADA",
                 confidence=92,
@@ -1255,11 +1690,11 @@ class MirrorGlass:
                 clahe_status=clahe_status
             )
         
-        if weighted_texture > config.th_texture_natural and not force_continue_to_phase2:
+        if weighted_texture > config.th_texture_natural and not force_continue_to_phase3:
             return self._build_response(
                 verdict="NATURAL",
                 confidence=85,
-                reason="Textura natural com alta variabilidade",
+                reason="Textura natural confirmada",
                 main_score=int(weighted_texture),
                 all_scores=all_scores,
                 validation_chain=validation_chain,
@@ -1308,15 +1743,19 @@ class MirrorGlass:
         if self.manual_config.enable_boost_glass and is_smooth and reflection_pct > 0.10:
             weighted_noise += 15
 
+        combined_manipulation_detected = False
+        
         if scene_type == SceneType.CAR_GLASS_REFLECTION:
             combined_manipulation_detected = (
                 noise_score >= 60 and
                 reflection_percent < 19 and
                 reflection_percent > 12 and
-                texture_score > 20
+                texture_score > 20 and
+                texture_score < 50
             )
             
-            if combined_manipulation_detected:
+        if combined_manipulation_detected:
+            if scene_type == SceneType.CAR_GLASS_REFLECTION:
                 self.logger.log("COMBINED_RULE", "Regra combinada ativada (car_glass_reflection): ruído>=60, reflexo 12-19%, textura>20", {
                     "noise_score": noise_score,
                     "reflection_percent": round(reflection_percent, 2),
@@ -1335,6 +1774,7 @@ class MirrorGlass:
                     heatmap=texture_result['heatmap'] if texture_result else None,
                     clahe_status=clahe_status
                 )
+            
         
         if weighted_noise < config.th_noise_manipulated:
             return self._build_response(
@@ -1441,10 +1881,11 @@ class MirrorGlass:
     
     def _print_logs(self, result: Dict):
         print("\n" + "="*60)
-        print("LOGS DA ANÁLISE - MirrorGlass V6.2")
+        print("LOGS DA ANÁLISE - MirrorGlass V7 (com Gemini Detection)")
         print("="*60)
         print(f"Cena detectada: {result.get('scene_type', 'unknown')}")
         print(f"Modo automático: {result['manual_config']['auto_mode']}")
+        print(f"Watermark Gemini: {result.get('gemini_watermark', {}).get('gemini_detected', False)}")
         print(f"Análise CAR_GLASS específica: {result['manual_config'].get('use_car_glass_specific', False)}")
         print(f"CLAHE Status: {result.get('clahe_status', {})}")
         print("-"*60)
@@ -1463,6 +1904,7 @@ def create_default_manual_config() -> ManualConfig:
         enable_boost_reflection=True,
         enable_boost_smooth=True,
         enable_boost_glass=True,
+        enable_watermark_detection=True,
         use_car_glass_specific=True,
         clahe_config=CLAHEConfig()
     )
@@ -1470,5 +1912,15 @@ def create_default_manual_config() -> ManualConfig:
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("MirrorGlass V6.2 - Com Análise Específica CAR_GLASS")
+    print("MirrorGlass V7 - Com Detecção de Watermark Gemini")
     print("="*60)
+    
+    config = create_default_manual_config()
+    analyzer = MirrorGlass(detection_mode="Balanceado", manual_config=config)
+    
+    test_img = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+    result = analyzer.analyze(test_img)
+    
+    print(f"Verdict: {result['verdict']}")
+    print(f"Confidence: {result['confidence']}%")
+    print(f"Reason: {result['reason']}")
