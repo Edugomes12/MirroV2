@@ -1641,7 +1641,7 @@ class MirrorGlass:
             texture_suspicious_percent = texture_result["suspicious_ratio"] * 100
             all_scores["texture_suspicious_percent"] = texture_suspicious_percent
             
-            if scene_type == SceneType.CAR_GLASS_REFLECTION and texture_suspicious_percent <= 10 and reflection_percent > 20.99 and reflection_percent < 40 or texture_suspicious_percent < 1 and reflection_percent <= 18:
+            if scene_type == SceneType.CAR_GLASS_REFLECTION and texture_suspicious_percent <= 10 and reflection_percent > 20.99 and reflection_percent < 40 or texture_suspicious_percent < 1 and reflection_percent >= 18:
                 self.logger.log("CAR_GLASS_TEXTURE_RULE", 
                     f"Regra de textura ativada: {texture_suspicious_percent:.1f} em CAR_GLASS_REFLECTION",
                     {
